@@ -49,13 +49,16 @@ jobs:
           path: artifacts/windows
       - run: chmod +x artifacts/macos/nab artifacts/macos/start.command
       - name: Delete existing latest release
-        run: gh release delete latest --yes --repo ${{ github.repository }} 2>/dev/null || true
+        run: |
+          gh release delete latest --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/latest 2>/dev/null || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Create release
         run: |
           gh release create latest \
             --repo ${{ github.repository }} \
+            --target ${{ github.sha }} \
             --title "Latest Build" \
             --notes "see README" \
             "artifacts/macos/nab#nab" \
