@@ -23,7 +23,6 @@ use std::time::Duration;
 // MTU(1500) - IP(20) - UDP(8) - seq(4) = 1468 bytes → 128 stereo f32 = 1028 bytes < 1500 ✓
 const PACKET_SAMPLES: usize = 128;
 const CHANNELS: u16 = 2;
-const SAMPLE_RATE: u32 = 48000;
 const DEFAULT_PORT: u16 = 8000;
 const PACKET_BYTES: usize = 4 + (PACKET_SAMPLES * CHANNELS as usize * 4);
 
@@ -41,6 +40,7 @@ enum RunMode {
 #[derive(Clone)]
 struct RunConfig {
     mode: RunMode,
+    sample_rate: u32,
     input_device: Option<String>,
     output_device: Option<String>,
     remote_addr: String,
@@ -49,6 +49,7 @@ struct RunConfig {
 
 enum WizardStep {
     SelectMode { cursor: usize },
+    SelectSampleRate { cursor: usize },
     SelectInput { devices: Vec<String>, cursor: usize },
     SelectOutput { devices: Vec<String>, cursor: usize },
     EnterIP { buf: String },
@@ -171,18 +172,18 @@ fn run_app(
     let result = (|| -> Result<(), String> {
         if is_send {
             let dev = select_input_device(host, config.input_device.as_deref())?;
-            ensure_input_support(&dev)?;
+            ensure_input_support(&dev, config.sample_rate)?;
             let addr = config.remote_addr.clone();
             let s = Arc::clone(&state);
-            send_thread = Some(spawn_sender(dev, stream_config(), addr, s)?);
+            send_thread = Some(spawn_sender(dev, stream_config(config.sample_rate), addr, s)?);
         }
 
         if is_recv {
             let dev = select_output_device(host, config.output_device.as_deref())?;
-            ensure_output_support(&dev)?;
+            ensure_output_support(&dev, config.sample_rate)?;
             let addr = config.listen_addr.clone();
             let s = Arc::clone(&state);
-            recv_thread = Some(spawn_receiver(dev, stream_config(), addr, s)?);
+            recv_thread = Some(spawn_receiver(dev, stream_config(config.sample_rate), addr, s)?);
         }
 
         run_tui(terminal, &config, &state).map_err(|e| e.to_string())
@@ -199,10 +200,10 @@ fn run_app(
     result
 }
 
-fn stream_config() -> cpal::StreamConfig {
+fn stream_config(sample_rate: u32) -> cpal::StreamConfig {
     cpal::StreamConfig {
         channels: CHANNELS,
-        sample_rate: cpal::SampleRate(SAMPLE_RATE),
+        sample_rate: cpal::SampleRate(sample_rate),
         buffer_size: cpal::BufferSize::Default,
     }
 }
@@ -247,7 +248,7 @@ fn select_output_device(
         .ok_or_else(|| "エラー: 出力デバイスが見つかりません".to_string())
 }
 
-fn ensure_input_support(device: &cpal::Device) -> Result<(), String> {
+fn ensure_input_support(device: &cpal::Device, sample_rate: u32) -> Result<(), String> {
     let mut configs = device.supported_input_configs().map_err(|e| {
         format!(
             "入力デバイス「{}」の対応フォーマット取得に失敗: {}",
@@ -258,21 +259,21 @@ fn ensure_input_support(device: &cpal::Device) -> Result<(), String> {
     let supported = configs.any(|r| {
         r.channels() == CHANNELS
             && r.sample_format() == cpal::SampleFormat::F32
-            && r.min_sample_rate().0 <= SAMPLE_RATE
-            && r.max_sample_rate().0 >= SAMPLE_RATE
+            && r.min_sample_rate().0 <= sample_rate
+            && r.max_sample_rate().0 >= sample_rate
     });
 
     if supported {
         Ok(())
     } else {
         Err(format!(
-            "エラー: 入力デバイス「{}」は 48kHz / ステレオ / f32 に対応していません。\nオーディオインターフェースのサンプルレートやフォーマット設定を確認してください。",
-            device_name(device)
+            "エラー: 入力デバイス「{}」は {}kHz / ステレオ / f32 に対応していません。\nデバイスのサンプルレート設定を確認してください。",
+            device_name(device), sample_rate / 1000
         ))
     }
 }
 
-fn ensure_output_support(device: &cpal::Device) -> Result<(), String> {
+fn ensure_output_support(device: &cpal::Device, sample_rate: u32) -> Result<(), String> {
     let mut configs = device.supported_output_configs().map_err(|e| {
         format!(
             "出力デバイス「{}」の対応フォーマット取得に失敗: {}",
@@ -283,16 +284,16 @@ fn ensure_output_support(device: &cpal::Device) -> Result<(), String> {
     let supported = configs.any(|r| {
         r.channels() == CHANNELS
             && r.sample_format() == cpal::SampleFormat::F32
-            && r.min_sample_rate().0 <= SAMPLE_RATE
-            && r.max_sample_rate().0 >= SAMPLE_RATE
+            && r.min_sample_rate().0 <= sample_rate
+            && r.max_sample_rate().0 >= sample_rate
     });
 
     if supported {
         Ok(())
     } else {
         Err(format!(
-            "エラー: 出力デバイス「{}」は 48kHz / ステレオ / f32 に対応していません。\nオーディオインターフェースのサンプルレートやフォーマット設定を確認してください。",
-            device_name(device)
+            "エラー: 出力デバイス「{}」は {}kHz / ステレオ / f32 に対応していません。\nデバイスのサンプルレート設定を確認してください。",
+            device_name(device), sample_rate / 1000
         ))
     }
 }
@@ -309,6 +310,7 @@ fn run_wizard(
     let mut step = WizardStep::SelectMode { cursor: 0 };
     let mut config = RunConfig {
         mode: RunMode::Send,
+        sample_rate: 48000,
         input_device: None,
         output_device: None,
         remote_addr: String::new(),
@@ -335,6 +337,21 @@ fn run_wizard(
                             1 => RunMode::Recv,
                             _ => RunMode::Duplex,
                         };
+                        step = WizardStep::SelectSampleRate { cursor: 1 }; // デフォルト48kHz
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                    _ => {}
+                },
+
+                WizardStep::SelectSampleRate { cursor } => match key.code {
+                    KeyCode::Up => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down => *cursor = (*cursor + 1).min(2),
+                    KeyCode::Enter => {
+                        config.sample_rate = match *cursor {
+                            0 => 44100,
+                            1 => 48000,
+                            _ => 96000,
+                        };
                         step = if config.mode != RunMode::Recv {
                             WizardStep::SelectInput {
                                 devices: input_devices.to_vec(),
@@ -347,7 +364,7 @@ fn run_wizard(
                             }
                         };
                     }
-                    KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                    KeyCode::Esc => return Ok(None),
                     _ => {}
                 },
 
@@ -438,6 +455,34 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
                 .enumerate()
                 .map(|(i, &m)| {
                     let item = ListItem::new(format!("  {}", m));
+                    if i == *cursor {
+                        item.style(Style::default().fg(Color::Black).bg(Color::Cyan))
+                    } else {
+                        item
+                    }
+                })
+                .collect();
+            let mut s = ListState::default();
+            s.select(Some(*cursor));
+            f.render_stateful_widget(List::new(items), layout[1], &mut s);
+            f.render_widget(
+                Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了")
+                    .style(Style::default().fg(Color::DarkGray)),
+                layout[2],
+            );
+        }
+        WizardStep::SelectSampleRate { cursor } => {
+            f.render_widget(
+                Paragraph::new("サンプルレートを選択  ※送受信で同じレートを選んでください")
+                    .style(Style::default().fg(Color::Yellow)),
+                layout[0],
+            );
+            let rates = ["44.1 kHz", "48 kHz  （デフォルト）", "96 kHz"];
+            let items: Vec<ListItem> = rates
+                .iter()
+                .enumerate()
+                .map(|(i, &r)| {
+                    let item = ListItem::new(format!("  {}", r));
                     if i == *cursor {
                         item.style(Style::default().fg(Color::Black).bg(Color::Cyan))
                     } else {
@@ -650,7 +695,7 @@ fn run_tui(
             f.render_widget(
                 Paragraph::new(format!(
                     " {}kHz / {}ch / f32   目標: {}ms   バッファ: {}ms   帯域: {}   [+][-]",
-                    SAMPLE_RATE / 1000, CHANNELS, jitter_ms, buf_ms, bw_str
+                    config.sample_rate / 1000, CHANNELS, jitter_ms, buf_ms, bw_str
                 ))
                 .block(Block::default().title("ネットワーク").borders(Borders::ALL))
                 .style(Style::default().fg(Color::Cyan)),
@@ -735,7 +780,8 @@ fn run_sender(
     ready_tx: mpsc::SyncSender<Result<(), String>>,
 ) {
     let ch = CHANNELS as usize;
-    let capacity = SAMPLE_RATE as usize * 2 * ch;
+    let sr = cfg.sample_rate.0 as usize;
+    let capacity = sr * 2 * ch;
     let rb = HeapRb::<f32>::new(capacity);
     let (mut prod, mut cons) = rb.split();
 
@@ -860,7 +906,8 @@ fn run_receiver(
         return;
     }
 
-    let rb = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2 * ch);
+    let sr = cfg.sample_rate.0 as usize;
+    let rb = HeapRb::<f32>::new(sr * 2 * ch);
     let (mut prod, mut cons) = rb.split();
 
     let rebuffering = Arc::new(AtomicBool::new(true));
@@ -924,11 +971,11 @@ fn run_receiver(
         }
 
         // バッファ残量をmsに変換して報告
-        let buf_ms = prod.len() * 1000 / (SAMPLE_RATE as usize * ch);
+        let buf_ms = prod.len() * 1000 / (sr * ch);
         state.recv_buffer_ms.store(buf_ms, Ordering::Relaxed);
 
         // ジッターバッファ分溜まったら再生開始（または再開）
-        let jitter_samples = state.jitter_buffer_ms.load(Ordering::Relaxed) * SAMPLE_RATE as usize / 1000 * ch;
+        let jitter_samples = state.jitter_buffer_ms.load(Ordering::Relaxed) * sr / 1000 * ch;
         if rebuffering.load(Ordering::Relaxed) && prod.len() >= jitter_samples {
             rebuffering.store(false, Ordering::Relaxed);
             if !playing {
