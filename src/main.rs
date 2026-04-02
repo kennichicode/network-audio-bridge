@@ -319,7 +319,7 @@ fn run_wizard(
             Event::Resize(_, _) => {
                 terminal.autoresize()?;
             }
-            Event::Key(key) => match &mut step {
+            Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => match &mut step {
                 WizardStep::SelectMode { cursor } => match key.code {
                     KeyCode::Up => *cursor = cursor.saturating_sub(1),
                     KeyCode::Down => *cursor = (*cursor + 1).min(2),
@@ -645,7 +645,7 @@ fn run_tui(
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
-                Event::Key(k) if k.code == KeyCode::Char('q') => break,
+                Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press && k.code == KeyCode::Char('q') => break,
                 Event::Resize(_, _) => terminal.autoresize()?,
                 _ => {}
             }
