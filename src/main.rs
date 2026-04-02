@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-const PACKET_SAMPLES: usize = 256;
+// MTU(1500) - IP(20) - UDP(8) - seq(4) = 1468 bytes → 128 stereo f32 = 1028 bytes < 1500 ✓
+const PACKET_SAMPLES: usize = 128;
 const CHANNELS: u16 = 2;
 const SAMPLE_RATE: u32 = 48000;
 const DEFAULT_PORT: u16 = 8000;
@@ -42,14 +43,15 @@ struct RunConfig {
 }
 
 enum WizardStep {
-    SelectMode { cursor: usize },
+    SelectMode   { cursor: usize },
     SelectInput  { devices: Vec<String>, cursor: usize },
     SelectOutput { devices: Vec<String>, cursor: usize },
-    EnterIP { buf: String },
+    EnterIP      { buf: String },
 }
 
 struct SharedState {
     packets_sent:    AtomicU64,
+    send_errors:     AtomicU64,
     packet_loss:     AtomicU64,
     send_buffer_pct: AtomicUsize,
     recv_buffer_pct: AtomicUsize,
@@ -59,6 +61,7 @@ impl SharedState {
     fn new() -> Self {
         Self {
             packets_sent:    AtomicU64::new(0),
+            send_errors:     AtomicU64::new(0),
             packet_loss:     AtomicU64::new(0),
             send_buffer_pct: AtomicUsize::new(0),
             recv_buffer_pct: AtomicUsize::new(0),
@@ -72,7 +75,15 @@ impl SharedState {
 // ───────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(feature = "asio")]
+    // パニック時にターミナルを必ず復旧する
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        default_hook(info);
+    }));
+
+    #[cfg(all(feature = "asio", target_os = "windows"))]
     let host = {
         let asio_id = cpal::available_hosts()
             .into_iter()
@@ -82,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             None     => cpal::default_host(),
         }
     };
-    #[cfg(not(feature = "asio"))]
+    #[cfg(not(all(feature = "asio", target_os = "windows")))]
     let host = cpal::default_host();
 
     let input_devices: Vec<String> = host.input_devices()
@@ -96,7 +107,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
 
-    // ウィザード
     let config = match run_wizard(&mut terminal, &input_devices, &output_devices)? {
         Some(c) => c,
         None => {
@@ -105,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // オーディオスレッド起動
+    // オーディオストリームを開く（フォーマット非対応なら画面にエラー表示）
     let state = Arc::new(SharedState::new());
     let is_send = matches!(config.mode, RunMode::Send | RunMode::Duplex);
     let is_recv = matches!(config.mode, RunMode::Recv | RunMode::Duplex);
@@ -115,23 +125,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if is_send {
         let dev = host.input_devices().unwrap()
             .find(|d| d.name().ok().as_deref() == config.input_device.as_deref())
-            .or_else(|| host.default_input_device())
-            .expect("入力デバイスなし");
-        let addr = config.remote_addr.clone();
-        let s = Arc::clone(&state);
-        send_thread = Some(thread::spawn(move || run_sender(dev, addr, s)));
+            .or_else(|| host.default_input_device());
+
+        match dev {
+            None => {
+                cleanup(&mut terminal)?;
+                eprintln!("エラー: 入力デバイスが見つかりません");
+                return Ok(());
+            }
+            Some(dev) => {
+                // デバイスが 48kHz/stereo に対応しているか確認
+                let cfg = cpal::StreamConfig {
+                    channels: CHANNELS,
+                    sample_rate: cpal::SampleRate(SAMPLE_RATE),
+                    buffer_size: cpal::BufferSize::Default,
+                };
+                // サポート確認（build前にチェック）
+                let supported = dev.supported_input_configs()
+                    .map(|mut c| c.any(|r| {
+                        r.channels() == CHANNELS
+                            && r.min_sample_rate().0 <= SAMPLE_RATE
+                            && r.max_sample_rate().0 >= SAMPLE_RATE
+                    }))
+                    .unwrap_or(false);
+
+                if !supported {
+                    cleanup(&mut terminal)?;
+                    eprintln!(
+                        "エラー: 入力デバイス「{}」は 48kHz / ステレオに対応していません。\nオーディオインターフェースのサンプルレートを 48kHz に設定してください。",
+                        dev.name().unwrap_or_default()
+                    );
+                    return Ok(());
+                }
+
+                let addr  = config.remote_addr.clone();
+                let s     = Arc::clone(&state);
+                send_thread = Some(thread::spawn(move || run_sender(dev, cfg, addr, s)));
+            }
+        }
     }
+
     if is_recv {
         let dev = host.output_devices().unwrap()
             .find(|d| d.name().ok().as_deref() == config.output_device.as_deref())
-            .or_else(|| host.default_output_device())
-            .expect("出力デバイスなし");
-        let addr = config.listen_addr.clone();
-        let s = Arc::clone(&state);
-        recv_thread = Some(thread::spawn(move || run_receiver(dev, addr, s)));
+            .or_else(|| host.default_output_device());
+
+        match dev {
+            None => {
+                cleanup(&mut terminal)?;
+                eprintln!("エラー: 出力デバイスが見つかりません");
+                return Ok(());
+            }
+            Some(dev) => {
+                let cfg = cpal::StreamConfig {
+                    channels: CHANNELS,
+                    sample_rate: cpal::SampleRate(SAMPLE_RATE),
+                    buffer_size: cpal::BufferSize::Default,
+                };
+                let supported = dev.supported_output_configs()
+                    .map(|mut c| c.any(|r| {
+                        r.channels() == CHANNELS
+                            && r.min_sample_rate().0 <= SAMPLE_RATE
+                            && r.max_sample_rate().0 >= SAMPLE_RATE
+                    }))
+                    .unwrap_or(false);
+
+                if !supported {
+                    cleanup(&mut terminal)?;
+                    eprintln!(
+                        "エラー: 出力デバイス「{}」は 48kHz / ステレオに対応していません。\nオーディオインターフェースのサンプルレートを 48kHz に設定してください。",
+                        dev.name().unwrap_or_default()
+                    );
+                    return Ok(());
+                }
+
+                let addr  = config.listen_addr.clone();
+                let s     = Arc::clone(&state);
+                recv_thread = Some(thread::spawn(move || run_receiver(dev, cfg, addr, s)));
+            }
+        }
     }
 
-    // メインTUI
     run_tui(&mut terminal, &config, &state)?;
 
     state.running.store(false, Ordering::Relaxed);
@@ -209,7 +283,7 @@ fn run_wizard(
                     KeyCode::Enter => {
                         config.output_device = devices.get(*cursor).cloned();
                         if config.mode == RunMode::Recv {
-                            return Ok(Some(config));   // 受信のみはIPアドレス不要
+                            return Ok(Some(config));
                         }
                         step = WizardStep::EnterIP { buf: String::new() };
                     }
@@ -226,11 +300,12 @@ fn run_wizard(
                         };
                         return Ok(Some(config));
                     }
-                    KeyCode::Backspace       => { buf.pop(); }
+                    KeyCode::Backspace              => { buf.pop(); }
                     KeyCode::Char(c) if c.is_ascii_graphic() => buf.push(c),
-                    KeyCode::Esc             => return Ok(None),
+                    KeyCode::Esc                    => return Ok(None),
                     _ => {}
                 },
+
             },
             _ => {}
         }
@@ -252,56 +327,38 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
 
     match step {
         WizardStep::SelectMode { cursor } => {
-            f.render_widget(
-                Paragraph::new("モードを選択").style(Style::default().fg(Color::Yellow)),
-                layout[0],
-            );
+            f.render_widget(Paragraph::new("モードを選択").style(Style::default().fg(Color::Yellow)), layout[0]);
             let modes = ["送信   — このデバイスの音を相手に送る", "受信   — 相手の音をこのデバイスで聴く", "双方向 — 送受信を同時に行う"];
             let items: Vec<ListItem> = modes.iter().enumerate().map(|(i, &m)| {
                 let item = ListItem::new(format!("  {}", m));
                 if i == *cursor { item.style(Style::default().fg(Color::Black).bg(Color::Cyan)) } else { item }
             }).collect();
-            let mut state = ListState::default();
-            state.select(Some(*cursor));
-            f.render_stateful_widget(List::new(items), layout[1], &mut state);
+            let mut s = ListState::default(); s.select(Some(*cursor));
+            f.render_stateful_widget(List::new(items), layout[1], &mut s);
             f.render_widget(Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了").style(Style::default().fg(Color::DarkGray)), layout[2]);
         }
-
         WizardStep::SelectInput { devices, cursor } => {
-            f.render_widget(
-                Paragraph::new("入力デバイス（マイク・インターフェース）を選択").style(Style::default().fg(Color::Yellow)),
-                layout[0],
-            );
-            let items: Vec<ListItem> = devices.iter().enumerate().map(|(i, name)| {
-                let item = ListItem::new(format!("  {}", name));
+            f.render_widget(Paragraph::new("入力デバイス（マイク・インターフェース）を選択").style(Style::default().fg(Color::Yellow)), layout[0]);
+            let items: Vec<ListItem> = devices.iter().enumerate().map(|(i, n)| {
+                let item = ListItem::new(format!("  {}", n));
                 if i == *cursor { item.style(Style::default().fg(Color::Black).bg(Color::Cyan)) } else { item }
             }).collect();
-            let mut state = ListState::default();
-            state.select(Some(*cursor));
-            f.render_stateful_widget(List::new(items), layout[1], &mut state);
+            let mut s = ListState::default(); s.select(Some(*cursor));
+            f.render_stateful_widget(List::new(items), layout[1], &mut s);
             f.render_widget(Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了").style(Style::default().fg(Color::DarkGray)), layout[2]);
         }
-
         WizardStep::SelectOutput { devices, cursor } => {
-            f.render_widget(
-                Paragraph::new("出力デバイス（スピーカー・インターフェース）を選択").style(Style::default().fg(Color::Yellow)),
-                layout[0],
-            );
-            let items: Vec<ListItem> = devices.iter().enumerate().map(|(i, name)| {
-                let item = ListItem::new(format!("  {}", name));
+            f.render_widget(Paragraph::new("出力デバイス（スピーカー・インターフェース）を選択").style(Style::default().fg(Color::Yellow)), layout[0]);
+            let items: Vec<ListItem> = devices.iter().enumerate().map(|(i, n)| {
+                let item = ListItem::new(format!("  {}", n));
                 if i == *cursor { item.style(Style::default().fg(Color::Black).bg(Color::Cyan)) } else { item }
             }).collect();
-            let mut state = ListState::default();
-            state.select(Some(*cursor));
-            f.render_stateful_widget(List::new(items), layout[1], &mut state);
+            let mut s = ListState::default(); s.select(Some(*cursor));
+            f.render_stateful_widget(List::new(items), layout[1], &mut s);
             f.render_widget(Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了").style(Style::default().fg(Color::DarkGray)), layout[2]);
         }
-
         WizardStep::EnterIP { buf } => {
-            f.render_widget(
-                Paragraph::new("相手のIPアドレスを入力  （例: 192.168.1.100）").style(Style::default().fg(Color::Yellow)),
-                layout[0],
-            );
+            f.render_widget(Paragraph::new("相手のIPアドレスを入力  （例: 192.168.1.100）").style(Style::default().fg(Color::Yellow)), layout[0]);
             f.render_widget(
                 Paragraph::new(format!("  {}█", buf))
                     .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))),
@@ -326,25 +383,25 @@ fn run_tui(
     let is_recv = matches!(config.mode, RunMode::Recv | RunMode::Duplex);
 
     loop {
-        let sent    = state.packets_sent.load(Ordering::Relaxed);
-        let loss    = state.packet_loss.load(Ordering::Relaxed);
-        let send_p  = state.send_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
-        let recv_p  = state.recv_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
+        let sent       = state.packets_sent.load(Ordering::Relaxed);
+        let send_err   = state.send_errors.load(Ordering::Relaxed);
+        let loss       = state.packet_loss.load(Ordering::Relaxed);
+        let send_p     = state.send_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
+        let recv_p     = state.recv_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
 
         terminal.draw(|f| {
             let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(1)
                 .constraints([
-                    Constraint::Length(3),  // ヘッダー
-                    Constraint::Length(4),  // デバイス
-                    Constraint::Length(3),  // 送信バッファ
-                    Constraint::Length(3),  // 受信バッファ
-                    Constraint::Length(3),  // 統計
+                    Constraint::Length(3),
+                    Constraint::Length(4),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
+                    Constraint::Length(3),
                 ])
                 .split(f.area());
 
-            // ヘッダー
             let conn = if is_send { format!("→ {}", config.remote_addr) } else { format!("← {}", config.listen_addr) };
             f.render_widget(
                 Paragraph::new(format!(" {}  {}  ● 動作中", mode_label, conn))
@@ -353,7 +410,6 @@ fn run_tui(
                 rows[0],
             );
 
-            // デバイス
             f.render_widget(
                 Paragraph::new(format!(
                     " 入力 : {}\n 出力 : {}",
@@ -364,28 +420,30 @@ fn run_tui(
                 rows[1],
             );
 
-            // 送信バッファ
             f.render_widget(
                 Gauge::default()
-                    .block(Block::default().title(if is_send { "送信バッファ" } else { "送信バッファ（未使用）" }).borders(Borders::ALL))
+                    .block(Block::default().title(if is_send { "送信バッファ" } else { "送信（未使用）" }).borders(Borders::ALL))
                     .gauge_style(Style::default().fg(if is_send { Color::Cyan } else { Color::DarkGray }))
                     .percent(if is_send { send_p } else { 0 }),
                 rows[2],
             );
 
-            // 受信バッファ
             f.render_widget(
                 Gauge::default()
-                    .block(Block::default().title(if is_recv { "受信バッファ" } else { "受信バッファ（未使用）" }).borders(Borders::ALL))
+                    .block(Block::default().title(if is_recv { "受信バッファ" } else { "受信（未使用）" }).borders(Borders::ALL))
                     .gauge_style(Style::default().fg(if is_recv { Color::Green } else { Color::DarkGray }))
                     .percent(if is_recv { recv_p } else { 0 }),
                 rows[3],
             );
 
-            // 統計
+            let stats_color = if send_err > 0 { Color::Red } else { Color::Reset };
             f.render_widget(
-                Paragraph::new(format!(" 送信済み: {:>10}   パケットロス: {:>6}   [q] 終了", sent, loss))
-                    .block(Block::default().title("統計").borders(Borders::ALL)),
+                Paragraph::new(format!(
+                    " 送信: {:>8}   送信エラー: {:>4}   ロス: {:>4}   [q] 終了",
+                    sent, send_err, loss
+                ))
+                .block(Block::default().title("統計").borders(Borders::ALL))
+                .style(Style::default().fg(stats_color)),
                 rows[4],
             );
         })?;
@@ -405,27 +463,29 @@ fn run_tui(
 // オーディオ送信
 // ───────────────────────────────────────────────
 
-fn run_sender(device: cpal::Device, target: String, state: Arc<SharedState>) {
-    let ch = CHANNELS as usize;
-    let cfg = cpal::StreamConfig {
-        channels: CHANNELS,
-        sample_rate: cpal::SampleRate(SAMPLE_RATE),
-        buffer_size: cpal::BufferSize::Default,
-    };
-    let socket   = UdpSocket::bind("0.0.0.0:0").expect("送信ソケット失敗");
+fn run_sender(device: cpal::Device, cfg: cpal::StreamConfig, target: String, state: Arc<SharedState>) {
+    let ch       = CHANNELS as usize;
     let capacity = SAMPLE_RATE as usize * 2 * ch;
     let rb       = HeapRb::<f32>::new(capacity);
     let (mut prod, mut cons) = rb.split();
 
-    let stream = device.build_input_stream(
+    let stream = match device.build_input_stream(
         &cfg,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
             for &s in data { let _ = prod.push(s); }
         },
         |e| eprintln!("入力エラー: {}", e),
         None,
-    ).expect("入力ストリーム構築失敗");
-    stream.play().expect("入力ストリーム開始失敗");
+    ) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("入力ストリーム構築失敗: {}", e); return; }
+    };
+    if let Err(e) = stream.play() { eprintln!("入力ストリーム開始失敗: {}", e); return; }
+
+    let socket = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(e) => { eprintln!("送信ソケット失敗: {}", e); return; }
+    };
 
     let frame = PACKET_SAMPLES * ch;
     let mut buf = vec![0.0f32; frame];
@@ -441,8 +501,11 @@ fn run_sender(device: cpal::Device, target: String, state: Arc<SharedState>) {
             for (i, &s) in buf.iter().enumerate() {
                 LittleEndian::write_f32(&mut pkt[4 + i * 4..4 + (i + 1) * 4], s);
             }
-            if socket.send_to(&pkt, &target).is_err() {}
-            state.packets_sent.fetch_add(1, Ordering::Relaxed);
+            // 送信成功時のみカウント、失敗は送信エラーとしてカウント
+            match socket.send_to(&pkt, &target) {
+                Ok(_)  => { state.packets_sent.fetch_add(1, Ordering::Relaxed); }
+                Err(_) => { state.send_errors.fetch_add(1, Ordering::Relaxed); }
+            }
             seq = seq.wrapping_add(1);
         } else {
             thread::sleep(Duration::from_micros(500));
@@ -454,21 +517,19 @@ fn run_sender(device: cpal::Device, target: String, state: Arc<SharedState>) {
 // オーディオ受信
 // ───────────────────────────────────────────────
 
-fn run_receiver(device: cpal::Device, listen: String, state: Arc<SharedState>) {
+fn run_receiver(device: cpal::Device, cfg: cpal::StreamConfig, listen: String, state: Arc<SharedState>) {
     let ch = CHANNELS as usize;
-    let cfg = cpal::StreamConfig {
-        channels: CHANNELS,
-        sample_rate: cpal::SampleRate(SAMPLE_RATE),
-        buffer_size: cpal::BufferSize::Default,
+    let socket = match UdpSocket::bind(&listen) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("受信ソケット失敗: {}", e); return; }
     };
-    let socket = UdpSocket::bind(&listen).expect("受信ソケット失敗");
     socket.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
 
     let rb = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2 * ch);
     let (mut prod, mut cons) = rb.split();
 
     let state_cb = Arc::clone(&state);
-    let stream = device.build_output_stream(
+    let stream = match device.build_output_stream(
         &cfg,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             let read = cons.pop_slice(data);
@@ -477,8 +538,11 @@ fn run_receiver(device: cpal::Device, listen: String, state: Arc<SharedState>) {
         },
         |e| eprintln!("出力エラー: {}", e),
         None,
-    ).expect("出力ストリーム構築失敗");
-    stream.play().expect("出力ストリーム開始失敗");
+    ) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("出力ストリーム構築失敗: {}", e); return; }
+    };
+    if let Err(e) = stream.play() { eprintln!("出力ストリーム開始失敗: {}", e); return; }
 
     let mut pkt = vec![0u8; PACKET_BYTES];
     let mut expected: Option<u32> = None;
