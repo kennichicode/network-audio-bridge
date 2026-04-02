@@ -12,13 +12,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
-      - run: chmod +x target/release/nab launchers/start.command
+      - run: |
+          mkdir -p staging
+          cp target/release/nab staging/nab
+          cp launchers/start.command staging/start.command
+          chmod +x staging/nab staging/start.command
       - uses: actions/upload-artifact@v4
         with:
           name: nab-macos
-          path: |
-            target/release/nab
-            launchers/start.command
+          path: staging/
 
   build-windows:
     runs-on: windows-latest
@@ -26,12 +28,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
+      - run: |
+          mkdir staging
+          copy target\release\nab.exe staging\nab.exe
+          copy launchers\start.bat staging\start.bat
+        shell: cmd
       - uses: actions/upload-artifact@v4
         with:
           name: nab-windows
-          path: |
-            target/release/nab.exe
-            launchers/start.bat
+          path: staging/
 
   release:
     needs: [build-macos, build-windows]
