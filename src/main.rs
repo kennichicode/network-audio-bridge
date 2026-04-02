@@ -649,8 +649,8 @@ fn run_tui(
             };
             f.render_widget(
                 Paragraph::new(format!(
-                    " 目標レイテンシー: {}ms   バッファ: {}ms   帯域: {}   [+][-] バッファ調整",
-                    jitter_ms, buf_ms, bw_str
+                    " {}kHz / {}ch / f32   目標: {}ms   バッファ: {}ms   帯域: {}   [+][-]",
+                    SAMPLE_RATE / 1000, CHANNELS, jitter_ms, buf_ms, bw_str
                 ))
                 .block(Block::default().title("ネットワーク").borders(Borders::ALL))
                 .style(Style::default().fg(Color::Cyan)),
