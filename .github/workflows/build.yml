@@ -1,4 +1,4 @@
-name: Build
+name: Build and Release
 
 on:
   push:
@@ -27,3 +27,32 @@ jobs:
         with:
           name: nab-windows
           path: target/release/nab.exe
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nab-macos
+          path: artifacts/macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: nab-windows
+          path: artifacts/windows
+      - name: Delete existing latest release
+        run: gh release delete latest --yes --repo ${{ github.repository }} 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create release
+        run: |
+          gh release create latest \
+            --repo ${{ github.repository }} \
+            --title "Latest Build" \
+            --notes "mainブランチの最新ビルド" \
+            artifacts/macos/nab \
+            artifacts/windows/nab.exe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
