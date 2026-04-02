@@ -826,14 +826,12 @@ fn run_receiver(
             return;
         }
     };
-    if let Err(e) = stream.play() {
-        let _ = ready_tx.send(Err(format!("出力ストリーム開始失敗: {}", e)));
-        return;
-    }
     let _ = ready_tx.send(Ok(()));
 
     let mut pkt = vec![0u8; PACKET_BYTES];
     let mut expected: Option<u32> = None;
+    let mut playing = false;
+    let prebuffer = 40 * PACKET_SAMPLES * ch; // ~106ms分溜めてから再生開始
 
     while state.running.load(Ordering::Relaxed) {
         match socket.recv_from(&mut pkt) {
@@ -860,6 +858,13 @@ fn run_receiver(
                 }
             }
             _ => {}
+        }
+        if !playing && prod.len() >= prebuffer {
+            if let Err(e) = stream.play() {
+                eprintln!("出力ストリーム開始失敗: {}", e);
+                break;
+            }
+            playing = true;
         }
     }
 }
