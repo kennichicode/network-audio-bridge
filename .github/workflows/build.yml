@@ -12,10 +12,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
+      - run: chmod +x target/release/nab launchers/start.command
       - uses: actions/upload-artifact@v4
         with:
           name: nab-macos
-          path: target/release/nab
+          path: |
+            target/release/nab
+            launchers/start.command
 
   build-windows:
     runs-on: windows-latest
@@ -26,7 +29,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: nab-windows
-          path: target/release/nab.exe
+          path: |
+            target/release/nab.exe
+            launchers/start.bat
 
   release:
     needs: [build-macos, build-windows]
@@ -42,6 +47,7 @@ jobs:
         with:
           name: nab-windows
           path: artifacts/windows
+      - run: chmod +x artifacts/macos/nab artifacts/macos/start.command
       - name: Delete existing latest release
         run: gh release delete latest --yes --repo ${{ github.repository }} 2>/dev/null || true
         env:
@@ -51,8 +57,27 @@ jobs:
           gh release create latest \
             --repo ${{ github.repository }} \
             --title "Latest Build" \
-            --notes "mainブランチの最新ビルド" \
-            artifacts/macos/nab \
-            artifacts/windows/nab.exe
+            --notes "$(cat <<'EOF'
+          ## ダウンロード方法
+
+          ### Windows
+          1. `nab.exe` と `start.bat` を同じフォルダに置く
+          2. `start.bat` をダブルクリック → ターミナルが開いてウィザードが起動
+
+          ### Mac
+          1. `nab` と `start.command` を同じフォルダに置く
+          2. `start.command` をダブルクリック → ターミナルが開いてウィザードが起動
+             （初回のみ「開発元を確認できない」と出たら 右クリック→開く）
+
+          ## PowerShell 1行インストール（Windows）
+          ```
+          irm https://github.com/kennichicode/network-audio-bridge/releases/latest/download/nab.exe -OutFile "$HOME\nab.exe"
+          ```
+          EOF
+          )" \
+            "artifacts/macos/nab#nab（Mac用）" \
+            "artifacts/macos/start.command#start.command（Macランチャー）" \
+            "artifacts/windows/nab.exe#nab.exe（Windows用）" \
+            "artifacts/windows/start.bat#start.bat（Windowsランチャー）"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

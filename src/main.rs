@@ -1,5 +1,4 @@
 use byteorder::{ByteOrder, LittleEndian};
-use clap::{Parser, ValueEnum};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -10,7 +9,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    widgets::{Block, Borders, Gauge, Paragraph},
+    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 use ringbuf::HeapRb;
@@ -21,423 +20,486 @@ use std::thread;
 use std::time::Duration;
 
 const PACKET_SAMPLES: usize = 256;
+const CHANNELS: u16 = 2;
+const SAMPLE_RATE: u32 = 48000;
+const DEFAULT_PORT: u16 = 8000;
+const PACKET_BYTES: usize = 4 + (PACKET_SAMPLES * CHANNELS as usize * 4);
 
-struct SharedState {
-    packets_sent: AtomicU64,
-    packet_loss: AtomicU64,
-    send_buffer_pct: AtomicUsize,
-    recv_buffer_pct: AtomicUsize,
-    running: AtomicBool,
+// ───────────────────────────────────────────────
+// データ型
+// ───────────────────────────────────────────────
+
+#[derive(Clone, PartialEq)]
+enum RunMode { Send, Recv, Duplex }
+
+#[derive(Clone)]
+struct RunConfig {
+    mode: RunMode,
+    input_device: Option<String>,
+    output_device: Option<String>,
+    remote_addr: String,
+    listen_addr: String,
 }
 
+enum WizardStep {
+    SelectMode { cursor: usize },
+    SelectInput  { devices: Vec<String>, cursor: usize },
+    SelectOutput { devices: Vec<String>, cursor: usize },
+    EnterIP { buf: String },
+}
+
+struct SharedState {
+    packets_sent:    AtomicU64,
+    packet_loss:     AtomicU64,
+    send_buffer_pct: AtomicUsize,
+    recv_buffer_pct: AtomicUsize,
+    running:         AtomicBool,
+}
 impl SharedState {
     fn new() -> Self {
         Self {
-            packets_sent: AtomicU64::new(0),
-            packet_loss: AtomicU64::new(0),
+            packets_sent:    AtomicU64::new(0),
+            packet_loss:     AtomicU64::new(0),
             send_buffer_pct: AtomicUsize::new(0),
             recv_buffer_pct: AtomicUsize::new(0),
-            running: AtomicBool::new(true),
+            running:         AtomicBool::new(true),
         }
     }
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about = "Rock-solid Network Audio Bridge", long_about = None)]
-struct Args {
-    #[arg(short, long)]
-    mode: Mode,
-
-    #[arg(long, default_value_t = 48000)]
-    sample_rate: u32,
-
-    /// チャンネル数（1=モノ、2=ステレオ、8=7.1ch など）
-    #[arg(long, default_value_t = 2)]
-    channels: u16,
-
-    #[arg(long, default_value = "127.0.0.1:8000")]
-    send_to: String,
-
-    #[arg(long, default_value = "0.0.0.0:8000")]
-    listen_on: String,
-
-    /// 送信に使うローカルIPアドレス（WiFiなど特定のインターフェースを選ぶ場合）
-    #[arg(long, default_value = "0.0.0.0")]
-    bind: String,
-
-    #[arg(long)]
-    input_device: Option<String>,
-
-    #[arg(long)]
-    output_device: Option<String>,
-
-    #[arg(long, default_value_t = false)]
-    list_devices: bool,
-
-    /// ASIO ホストを使用する（Windows専用、--features asio でビルドが必要）
-    #[cfg(feature = "asio")]
-    #[arg(long, default_value_t = false)]
-    asio: bool,
-}
-
-#[derive(ValueEnum, Clone, Debug, PartialEq)]
-enum Mode {
-    Send,
-    Recv,
-    Duplex,
-}
+// ───────────────────────────────────────────────
+// main
+// ───────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
-
-    // ホスト選択（ASIO or デフォルト）
     #[cfg(feature = "asio")]
-    let host = if args.asio {
+    let host = {
         let asio_id = cpal::available_hosts()
             .into_iter()
-            .find(|id| *id == cpal::HostId::Asio)
-            .expect("ASIOホストが見つかりません。ASIO4ALL等をインストールしてください。");
-        cpal::host_from_id(asio_id).expect("ASIOホストの初期化に失敗しました")
-    } else {
-        cpal::default_host()
+            .find(|id| *id == cpal::HostId::Asio);
+        match asio_id {
+            Some(id) => cpal::host_from_id(id).unwrap_or_else(|_| cpal::default_host()),
+            None     => cpal::default_host(),
+        }
     };
-
     #[cfg(not(feature = "asio"))]
     let host = cpal::default_host();
 
-    if args.list_devices {
-        println!("=== ホスト: {} ===", host.id().name());
-        println!("--- 入力デバイス ---");
-        if let Ok(devices) = host.input_devices() {
-            for (i, dev) in devices.enumerate() {
-                let name = dev.name().unwrap_or_else(|_| "Unknown".to_string());
-                let configs = dev.supported_input_configs()
-                    .map(|c| {
-                        c.map(|cfg| format!("{}ch", cfg.channels()))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                println!("{}: {} [{}]", i, name, configs);
-            }
-        }
-        println!("--- 出力デバイス ---");
-        if let Ok(devices) = host.output_devices() {
-            for (i, dev) in devices.enumerate() {
-                let name = dev.name().unwrap_or_else(|_| "Unknown".to_string());
-                let configs = dev.supported_output_configs()
-                    .map(|c| {
-                        c.map(|cfg| format!("{}ch", cfg.channels()))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                println!("{}: {} [{}]", i, name, configs);
-            }
-        }
-        return Ok(());
-    }
+    let input_devices: Vec<String> = host.input_devices()
+        .map(|d| d.filter_map(|x| x.name().ok()).collect())
+        .unwrap_or_default();
+    let output_devices: Vec<String> = host.output_devices()
+        .map(|d| d.filter_map(|x| x.name().ok()).collect())
+        .unwrap_or_default();
 
-    let channels = args.channels;
-    let is_send = args.mode == Mode::Send || args.mode == Mode::Duplex;
-    let is_recv = args.mode == Mode::Recv || args.mode == Mode::Duplex;
+    enable_raw_mode()?;
+    execute!(std::io::stdout(), EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
 
+    // ウィザード
+    let config = match run_wizard(&mut terminal, &input_devices, &output_devices)? {
+        Some(c) => c,
+        None => {
+            cleanup(&mut terminal)?;
+            return Ok(());
+        }
+    };
+
+    // オーディオスレッド起動
     let state = Arc::new(SharedState::new());
-    let mode_str = format!("{:?}", args.mode).to_uppercase();
-
+    let is_send = matches!(config.mode, RunMode::Send | RunMode::Duplex);
+    let is_recv = matches!(config.mode, RunMode::Recv | RunMode::Duplex);
     let mut send_thread = None;
     let mut recv_thread = None;
-    let mut input_device_name = "-".to_string();
-    let mut output_device_name = "-".to_string();
 
     if is_send {
-        let send_ip = args.send_to.clone();
-        let bind_addr = args.bind.clone();
-        let sample_rate = args.sample_rate;
-        let state_clone = Arc::clone(&state);
-
-        let device = if let Some(name) = args.input_device.clone() {
-            host.input_devices()
-                .unwrap()
-                .find(|x| x.name().unwrap_or_default() == name)
-                .expect("指定した入力デバイスが見つかりません")
-        } else {
-            host.default_input_device().expect("デフォルト入力デバイスなし")
-        };
-        input_device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-
-        send_thread = Some(thread::spawn(move || {
-            run_sender(device, send_ip, bind_addr, sample_rate, channels, state_clone);
-        }));
+        let dev = host.input_devices().unwrap()
+            .find(|d| d.name().ok().as_deref() == config.input_device.as_deref())
+            .or_else(|| host.default_input_device())
+            .expect("入力デバイスなし");
+        let addr = config.remote_addr.clone();
+        let s = Arc::clone(&state);
+        send_thread = Some(thread::spawn(move || run_sender(dev, addr, s)));
     }
-
     if is_recv {
-        let listen_ip = args.listen_on.clone();
-        let sample_rate = args.sample_rate;
-        let state_clone = Arc::clone(&state);
-
-        let device = if let Some(name) = args.output_device.clone() {
-            host.output_devices()
-                .unwrap()
-                .find(|x| x.name().unwrap_or_default() == name)
-                .expect("指定した出力デバイスが見つかりません")
-        } else {
-            host.default_output_device().expect("デフォルト出力デバイスなし")
-        };
-        output_device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-
-        recv_thread = Some(thread::spawn(move || {
-            run_receiver(device, listen_ip, sample_rate, channels, state_clone);
-        }));
+        let dev = host.output_devices().unwrap()
+            .find(|d| d.name().ok().as_deref() == config.output_device.as_deref())
+            .or_else(|| host.default_output_device())
+            .expect("出力デバイスなし");
+        let addr = config.listen_addr.clone();
+        let s = Arc::clone(&state);
+        recv_thread = Some(thread::spawn(move || run_receiver(dev, addr, s)));
     }
 
-    // TUI
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    // メインTUI
+    run_tui(&mut terminal, &config, &state)?;
+
+    state.running.store(false, Ordering::Relaxed);
+    cleanup(&mut terminal)?;
+    if let Some(t) = send_thread { let _ = t.join(); }
+    if let Some(t) = recv_thread { let _ = t.join(); }
+    Ok(())
+}
+
+fn cleanup(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<(), Box<dyn std::error::Error>> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    Ok(())
+}
+
+// ───────────────────────────────────────────────
+// ウィザード
+// ───────────────────────────────────────────────
+
+fn run_wizard(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    input_devices: &[String],
+    output_devices: &[String],
+) -> Result<Option<RunConfig>, Box<dyn std::error::Error>> {
+    let mut step = WizardStep::SelectMode { cursor: 0 };
+    let mut config = RunConfig {
+        mode: RunMode::Send,
+        input_device: None,
+        output_device: None,
+        remote_addr: String::new(),
+        listen_addr: format!("0.0.0.0:{}", DEFAULT_PORT),
+    };
 
     loop {
-        let packets_sent = state.packets_sent.load(Ordering::Relaxed);
-        let packet_loss = state.packet_loss.load(Ordering::Relaxed);
-        let send_buf = state.send_buffer_pct.load(Ordering::Relaxed).min(100);
-        let recv_buf = state.recv_buffer_pct.load(Ordering::Relaxed).min(100);
+        terminal.draw(|f| draw_wizard(f, &step))?;
+
+        if !event::poll(Duration::from_millis(100))? { continue; }
+        match event::read()? {
+            Event::Resize(_, _) => { terminal.autoresize()?; }
+            Event::Key(key) => match &mut step {
+
+                WizardStep::SelectMode { cursor } => match key.code {
+                    KeyCode::Up    => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down  => *cursor = (*cursor + 1).min(2),
+                    KeyCode::Enter => {
+                        config.mode = match *cursor { 0 => RunMode::Send, 1 => RunMode::Recv, _ => RunMode::Duplex };
+                        step = if config.mode != RunMode::Recv {
+                            WizardStep::SelectInput  { devices: input_devices.to_vec(),  cursor: 0 }
+                        } else {
+                            WizardStep::SelectOutput { devices: output_devices.to_vec(), cursor: 0 }
+                        };
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                    _ => {}
+                },
+
+                WizardStep::SelectInput { devices, cursor } => match key.code {
+                    KeyCode::Up    => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down  => *cursor = (*cursor + 1).min(devices.len().saturating_sub(1)),
+                    KeyCode::Enter => {
+                        config.input_device = devices.get(*cursor).cloned();
+                        step = if config.mode == RunMode::Duplex {
+                            WizardStep::SelectOutput { devices: output_devices.to_vec(), cursor: 0 }
+                        } else {
+                            WizardStep::EnterIP { buf: String::new() }
+                        };
+                    }
+                    KeyCode::Esc => return Ok(None),
+                    _ => {}
+                },
+
+                WizardStep::SelectOutput { devices, cursor } => match key.code {
+                    KeyCode::Up    => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down  => *cursor = (*cursor + 1).min(devices.len().saturating_sub(1)),
+                    KeyCode::Enter => {
+                        config.output_device = devices.get(*cursor).cloned();
+                        if config.mode == RunMode::Recv {
+                            return Ok(Some(config));   // 受信のみはIPアドレス不要
+                        }
+                        step = WizardStep::EnterIP { buf: String::new() };
+                    }
+                    KeyCode::Esc => return Ok(None),
+                    _ => {}
+                },
+
+                WizardStep::EnterIP { buf } => match key.code {
+                    KeyCode::Enter if !buf.is_empty() => {
+                        config.remote_addr = if buf.contains(':') {
+                            buf.clone()
+                        } else {
+                            format!("{}:{}", buf, DEFAULT_PORT)
+                        };
+                        return Ok(Some(config));
+                    }
+                    KeyCode::Backspace       => { buf.pop(); }
+                    KeyCode::Char(c) if c.is_ascii_graphic() => buf.push(c),
+                    KeyCode::Esc             => return Ok(None),
+                    _ => {}
+                },
+            },
+            _ => {}
+        }
+    }
+}
+
+fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
+    let outer = Block::default()
+        .title(" Network Audio Bridge — セットアップ ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    f.render_widget(outer, f.area());
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([Constraint::Length(2), Constraint::Min(4), Constraint::Length(2)])
+        .split(f.area());
+
+    match step {
+        WizardStep::SelectMode { cursor } => {
+            f.render_widget(
+                Paragraph::new("モードを選択").style(Style::default().fg(Color::Yellow)),
+                layout[0],
+            );
+            let modes = ["送信   — このデバイスの音を相手に送る", "受信   — 相手の音をこのデバイスで聴く", "双方向 — 送受信を同時に行う"];
+            let items: Vec<ListItem> = modes.iter().enumerate().map(|(i, &m)| {
+                let item = ListItem::new(format!("  {}", m));
+                if i == *cursor { item.style(Style::default().fg(Color::Black).bg(Color::Cyan)) } else { item }
+            }).collect();
+            let mut state = ListState::default();
+            state.select(Some(*cursor));
+            f.render_stateful_widget(List::new(items), layout[1], &mut state);
+            f.render_widget(Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了").style(Style::default().fg(Color::DarkGray)), layout[2]);
+        }
+
+        WizardStep::SelectInput { devices, cursor } => {
+            f.render_widget(
+                Paragraph::new("入力デバイス（マイク・インターフェース）を選択").style(Style::default().fg(Color::Yellow)),
+                layout[0],
+            );
+            let items: Vec<ListItem> = devices.iter().enumerate().map(|(i, name)| {
+                let item = ListItem::new(format!("  {}", name));
+                if i == *cursor { item.style(Style::default().fg(Color::Black).bg(Color::Cyan)) } else { item }
+            }).collect();
+            let mut state = ListState::default();
+            state.select(Some(*cursor));
+            f.render_stateful_widget(List::new(items), layout[1], &mut state);
+            f.render_widget(Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了").style(Style::default().fg(Color::DarkGray)), layout[2]);
+        }
+
+        WizardStep::SelectOutput { devices, cursor } => {
+            f.render_widget(
+                Paragraph::new("出力デバイス（スピーカー・インターフェース）を選択").style(Style::default().fg(Color::Yellow)),
+                layout[0],
+            );
+            let items: Vec<ListItem> = devices.iter().enumerate().map(|(i, name)| {
+                let item = ListItem::new(format!("  {}", name));
+                if i == *cursor { item.style(Style::default().fg(Color::Black).bg(Color::Cyan)) } else { item }
+            }).collect();
+            let mut state = ListState::default();
+            state.select(Some(*cursor));
+            f.render_stateful_widget(List::new(items), layout[1], &mut state);
+            f.render_widget(Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了").style(Style::default().fg(Color::DarkGray)), layout[2]);
+        }
+
+        WizardStep::EnterIP { buf } => {
+            f.render_widget(
+                Paragraph::new("相手のIPアドレスを入力  （例: 192.168.1.100）").style(Style::default().fg(Color::Yellow)),
+                layout[0],
+            );
+            f.render_widget(
+                Paragraph::new(format!("  {}█", buf))
+                    .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan))),
+                layout[1],
+            );
+            f.render_widget(Paragraph::new("Enter 決定   Esc 終了").style(Style::default().fg(Color::DarkGray)), layout[2]);
+        }
+    }
+}
+
+// ───────────────────────────────────────────────
+// メインTUI（動作中）
+// ───────────────────────────────────────────────
+
+fn run_tui(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    config: &RunConfig,
+    state: &Arc<SharedState>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mode_label = match config.mode { RunMode::Send => "送信", RunMode::Recv => "受信", RunMode::Duplex => "双方向" };
+    let is_send = matches!(config.mode, RunMode::Send | RunMode::Duplex);
+    let is_recv = matches!(config.mode, RunMode::Recv | RunMode::Duplex);
+
+    loop {
+        let sent    = state.packets_sent.load(Ordering::Relaxed);
+        let loss    = state.packet_loss.load(Ordering::Relaxed);
+        let send_p  = state.send_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
+        let recv_p  = state.recv_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
 
         terminal.draw(|f| {
-            let chunks = Layout::default()
+            let rows = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(1)
                 .constraints([
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
-                    Constraint::Length(3),
+                    Constraint::Length(3),  // ヘッダー
+                    Constraint::Length(4),  // デバイス
+                    Constraint::Length(3),  // 送信バッファ
+                    Constraint::Length(3),  // 受信バッファ
+                    Constraint::Length(3),  // 統計
                 ])
                 .split(f.area());
 
-            let title = Paragraph::new(format!(
-                " Mode: {}  Channels: {}ch  Status: ● RUNNING",
-                mode_str, channels
-            ))
-            .block(Block::default().title("Network Audio Bridge").borders(Borders::ALL));
-            f.render_widget(title, chunks[0]);
+            // ヘッダー
+            let conn = if is_send { format!("→ {}", config.remote_addr) } else { format!("← {}", config.listen_addr) };
+            f.render_widget(
+                Paragraph::new(format!(" {}  {}  ● 動作中", mode_label, conn))
+                    .block(Block::default().title("Network Audio Bridge").borders(Borders::ALL))
+                    .style(Style::default().fg(Color::Cyan)),
+                rows[0],
+            );
 
-            let devices = Paragraph::new(format!(
-                " Input:  {}\n Output: {}",
-                input_device_name, output_device_name
-            ))
-            .block(Block::default().title("Devices").borders(Borders::ALL));
-            f.render_widget(devices, chunks[1]);
+            // デバイス
+            f.render_widget(
+                Paragraph::new(format!(
+                    " 入力 : {}\n 出力 : {}",
+                    config.input_device.as_deref().unwrap_or("—"),
+                    config.output_device.as_deref().unwrap_or("—"),
+                ))
+                .block(Block::default().title("デバイス").borders(Borders::ALL)),
+                rows[1],
+            );
 
-            let send_gauge = Gauge::default()
-                .block(Block::default().title("Send Buffer").borders(Borders::ALL))
-                .gauge_style(Style::default().fg(Color::Cyan))
-                .percent(send_buf as u16);
-            f.render_widget(send_gauge, chunks[2]);
+            // 送信バッファ
+            f.render_widget(
+                Gauge::default()
+                    .block(Block::default().title(if is_send { "送信バッファ" } else { "送信バッファ（未使用）" }).borders(Borders::ALL))
+                    .gauge_style(Style::default().fg(if is_send { Color::Cyan } else { Color::DarkGray }))
+                    .percent(if is_send { send_p } else { 0 }),
+                rows[2],
+            );
 
-            let recv_gauge = Gauge::default()
-                .block(Block::default().title("Recv Buffer").borders(Borders::ALL))
-                .gauge_style(Style::default().fg(Color::Green))
-                .percent(recv_buf as u16);
-            f.render_widget(recv_gauge, chunks[3]);
+            // 受信バッファ
+            f.render_widget(
+                Gauge::default()
+                    .block(Block::default().title(if is_recv { "受信バッファ" } else { "受信バッファ（未使用）" }).borders(Borders::ALL))
+                    .gauge_style(Style::default().fg(if is_recv { Color::Green } else { Color::DarkGray }))
+                    .percent(if is_recv { recv_p } else { 0 }),
+                rows[3],
+            );
 
-            let stats = Paragraph::new(format!(
-                " Packets sent: {:>12}    Packet loss: {:>8}",
-                packets_sent, packet_loss
-            ))
-            .block(Block::default().title("Stats").borders(Borders::ALL));
-            f.render_widget(stats, chunks[4]);
-
-            let help = Paragraph::new(" [q] Quit")
-                .block(Block::default().borders(Borders::ALL));
-            f.render_widget(help, chunks[5]);
+            // 統計
+            f.render_widget(
+                Paragraph::new(format!(" 送信済み: {:>10}   パケットロス: {:>6}   [q] 終了", sent, loss))
+                    .block(Block::default().title("統計").borders(Borders::ALL)),
+                rows[4],
+            );
         })?;
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
-                Event::Key(key) if key.code == KeyCode::Char('q') => {
-                    state.running.store(false, Ordering::Relaxed);
-                    break;
-                }
-                Event::Resize(_, _) => {
-                    terminal.autoresize()?;
-                }
+                Event::Key(k) if k.code == KeyCode::Char('q') => break,
+                Event::Resize(_, _) => terminal.autoresize()?,
                 _ => {}
             }
         }
     }
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-
-    if let Some(t) = send_thread {
-        let _ = t.join();
-    }
-    if let Some(t) = recv_thread {
-        let _ = t.join();
-    }
-
     Ok(())
 }
 
-fn run_sender(
-    device: cpal::Device,
-    target_addr: String,
-    bind_addr: String,
-    sample_rate: u32,
-    channels: u16,
-    state: Arc<SharedState>,
-) {
-    let ch = channels as usize;
-    let packet_bytes_size = 4 + (PACKET_SAMPLES * ch * 4);
+// ───────────────────────────────────────────────
+// オーディオ送信
+// ───────────────────────────────────────────────
 
-    let config = cpal::StreamConfig {
-        channels,
-        sample_rate: cpal::SampleRate(sample_rate),
+fn run_sender(device: cpal::Device, target: String, state: Arc<SharedState>) {
+    let ch = CHANNELS as usize;
+    let cfg = cpal::StreamConfig {
+        channels: CHANNELS,
+        sample_rate: cpal::SampleRate(SAMPLE_RATE),
         buffer_size: cpal::BufferSize::Default,
     };
-
-    let socket = UdpSocket::bind(format!("{}:0", bind_addr))
-        .expect("送信ソケットのバインドに失敗しました");
-
-    let capacity = sample_rate as usize * 2 * ch;
-    let rb = HeapRb::<f32>::new(capacity);
+    let socket   = UdpSocket::bind("0.0.0.0:0").expect("送信ソケット失敗");
+    let capacity = SAMPLE_RATE as usize * 2 * ch;
+    let rb       = HeapRb::<f32>::new(capacity);
     let (mut prod, mut cons) = rb.split();
 
-    let err_fn = |err| eprintln!("入力ストリームエラー: {}", err);
+    let stream = device.build_input_stream(
+        &cfg,
+        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            for &s in data { let _ = prod.push(s); }
+        },
+        |e| eprintln!("入力エラー: {}", e),
+        None,
+    ).expect("入力ストリーム構築失敗");
+    stream.play().expect("入力ストリーム開始失敗");
 
-    let stream = device
-        .build_input_stream(
-            &config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                for &sample in data {
-                    let _ = prod.push(sample);
-                }
-            },
-            err_fn,
-            None,
-        )
-        .expect("入力ストリームのビルドに失敗しました");
-
-    stream.play().expect("入力ストリームの再生開始に失敗しました");
-
-    let frame_size = PACKET_SAMPLES * ch;
-    let mut local_buf = vec![0.0f32; frame_size];
-    let mut packet_bytes = vec![0u8; packet_bytes_size];
-    let mut seq_num: u32 = 0;
+    let frame = PACKET_SAMPLES * ch;
+    let mut buf = vec![0.0f32; frame];
+    let mut pkt = vec![0u8; PACKET_BYTES];
+    let mut seq: u32 = 0;
 
     while state.running.load(Ordering::Relaxed) {
-        state
-            .send_buffer_pct
-            .store(cons.len() * 100 / capacity, Ordering::Relaxed);
-
-        if cons.len() >= frame_size {
-            let read = cons.pop_slice(&mut local_buf);
-            // pop_sliceが返した分だけ送信（不足分は前フレームのデータではなくゼロ埋め）
-            for i in read..frame_size {
-                local_buf[i] = 0.0;
+        state.send_buffer_pct.store(cons.len() * 100 / capacity, Ordering::Relaxed);
+        if cons.len() >= frame {
+            let read = cons.pop_slice(&mut buf);
+            for s in buf.iter_mut().skip(read) { *s = 0.0; }
+            LittleEndian::write_u32(&mut pkt[0..4], seq);
+            for (i, &s) in buf.iter().enumerate() {
+                LittleEndian::write_f32(&mut pkt[4 + i * 4..4 + (i + 1) * 4], s);
             }
-
-            LittleEndian::write_u32(&mut packet_bytes[0..4], seq_num);
-            for (i, &sample) in local_buf.iter().enumerate() {
-                LittleEndian::write_f32(&mut packet_bytes[4 + i * 4..4 + (i + 1) * 4], sample);
-            }
-
-            if let Err(e) = socket.send_to(&packet_bytes, &target_addr) {
-                eprintln!("UDPパケット送信失敗: {}", e);
-            }
+            if socket.send_to(&pkt, &target).is_err() {}
             state.packets_sent.fetch_add(1, Ordering::Relaxed);
-            seq_num = seq_num.wrapping_add(1);
+            seq = seq.wrapping_add(1);
         } else {
             thread::sleep(Duration::from_micros(500));
         }
     }
 }
 
-fn run_receiver(
-    device: cpal::Device,
-    listen_addr: String,
-    sample_rate: u32,
-    channels: u16,
-    state: Arc<SharedState>,
-) {
-    let ch = channels as usize;
-    let packet_bytes_size = 4 + (PACKET_SAMPLES * ch * 4);
+// ───────────────────────────────────────────────
+// オーディオ受信
+// ───────────────────────────────────────────────
 
-    let config = cpal::StreamConfig {
-        channels,
-        sample_rate: cpal::SampleRate(sample_rate),
+fn run_receiver(device: cpal::Device, listen: String, state: Arc<SharedState>) {
+    let ch = CHANNELS as usize;
+    let cfg = cpal::StreamConfig {
+        channels: CHANNELS,
+        sample_rate: cpal::SampleRate(SAMPLE_RATE),
         buffer_size: cpal::BufferSize::Default,
     };
+    let socket = UdpSocket::bind(&listen).expect("受信ソケット失敗");
+    socket.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
 
-    let socket = UdpSocket::bind(&listen_addr).expect("受信ソケットのバインドに失敗しました");
-    socket
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
-
-    let capacity = sample_rate as usize * 2 * ch;
-    let rb = HeapRb::<f32>::new(capacity);
+    let rb = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2 * ch);
     let (mut prod, mut cons) = rb.split();
 
-    let state_for_cb = Arc::clone(&state);
-    let err_fn = |err| eprintln!("出力ストリームエラー: {}", err);
+    let state_cb = Arc::clone(&state);
+    let stream = device.build_output_stream(
+        &cfg,
+        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            let read = cons.pop_slice(data);
+            for s in data.iter_mut().skip(read) { *s = 0.0; }
+            state_cb.recv_buffer_pct.store(read * 100 / data.len().max(1), Ordering::Relaxed);
+        },
+        |e| eprintln!("出力エラー: {}", e),
+        None,
+    ).expect("出力ストリーム構築失敗");
+    stream.play().expect("出力ストリーム開始失敗");
 
-    let stream = device
-        .build_output_stream(
-            &config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let read_len = cons.pop_slice(data);
-                for sample in data.iter_mut().skip(read_len) {
-                    *sample = 0.0;
-                }
-                // 満足率：要求サンプルのうち何%をリングバッファから供給できたか
-                let pct = read_len * 100 / data.len().max(1);
-                state_for_cb
-                    .recv_buffer_pct
-                    .store(pct.min(100), Ordering::Relaxed);
-            },
-            err_fn,
-            None,
-        )
-        .expect("出力ストリームのビルドに失敗しました");
-
-    stream.play().expect("出力ストリームの再生開始に失敗しました");
-
-    let mut packet_bytes = vec![0u8; packet_bytes_size];
-    let mut expected_seq: Option<u32> = None;
+    let mut pkt = vec![0u8; PACKET_BYTES];
+    let mut expected: Option<u32> = None;
 
     while state.running.load(Ordering::Relaxed) {
-        match socket.recv_from(&mut packet_bytes) {
-            Ok((amt, _)) if amt == packet_bytes_size => {
-                let seq_num = LittleEndian::read_u32(&packet_bytes[0..4]);
-
-                if let Some(exp) = expected_seq {
-                    // wrap-around を考慮した差分計算
-                    let diff = seq_num.wrapping_sub(exp);
+        match socket.recv_from(&mut pkt) {
+            Ok((amt, _)) if amt == PACKET_BYTES => {
+                let seq = LittleEndian::read_u32(&pkt[0..4]);
+                if let Some(exp) = expected {
+                    let diff = seq.wrapping_sub(exp);
                     if diff > 0 && diff < u32::MAX / 2 {
-                        let lost_samples = (diff as usize) * PACKET_SAMPLES * ch;
-                        for _ in 0..lost_samples {
-                            let _ = prod.push(0.0);
-                        }
-                        state
-                            .packet_loss
-                            .fetch_add(diff as u64, Ordering::Relaxed);
+                        for _ in 0..(diff as usize * PACKET_SAMPLES * ch) { let _ = prod.push(0.0); }
+                        state.packet_loss.fetch_add(diff as u64, Ordering::Relaxed);
                     }
                 }
-
-                expected_seq = Some(seq_num.wrapping_add(1));
-
+                expected = Some(seq.wrapping_add(1));
                 for i in 0..(PACKET_SAMPLES * ch) {
-                    let sample =
-                        LittleEndian::read_f32(&packet_bytes[4 + i * 4..4 + (i + 1) * 4]);
-                    let _ = prod.push(sample);
+                    let _ = prod.push(LittleEndian::read_f32(&pkt[4 + i * 4..4 + (i + 1) * 4]));
                 }
             }
-            Ok(_) => {} // サイズ不一致は無視
-            Err(_) => {} // timeout → running フラグを再チェック
+            _ => {}
         }
     }
 }
