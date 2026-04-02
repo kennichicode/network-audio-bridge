@@ -540,8 +540,13 @@ fn run_tui(
     };
     let is_send = matches!(config.mode, RunMode::Send | RunMode::Duplex);
     let is_recv = matches!(config.mode, RunMode::Recv | RunMode::Duplex);
+    let mut quit_pending = false;
+    let mut quit_time = std::time::Instant::now();
 
     loop {
+        if quit_pending && quit_time.elapsed() > Duration::from_secs(1) {
+            quit_pending = false;
+        }
         let sent = state.packets_sent.load(Ordering::Relaxed);
         let send_err = state.send_errors.load(Ordering::Relaxed);
         let loss = state.packet_loss.load(Ordering::Relaxed);
@@ -632,20 +637,29 @@ fn run_tui(
             } else {
                 Color::Reset
             };
+            let stats_line = if quit_pending {
+                format!(" 送信: {:>8}   送信エラー: {:>4}   ロス: {:>4}   [q] もう一度で終了", sent, send_err, loss)
+            } else {
+                format!(" 送信: {:>8}   送信エラー: {:>4}   ロス: {:>4}   [q] 終了", sent, send_err, loss)
+            };
             f.render_widget(
-                Paragraph::new(format!(
-                    " 送信: {:>8}   送信エラー: {:>4}   ロス: {:>4}   [q] 終了",
-                    sent, send_err, loss
-                ))
+                Paragraph::new(stats_line)
                 .block(Block::default().title("統計").borders(Borders::ALL))
-                .style(Style::default().fg(stats_color)),
+                .style(Style::default().fg(if quit_pending { Color::Yellow } else { stats_color })),
                 rows[4],
             );
         })?;
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
-                Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press && k.code == KeyCode::Char('q') => break,
+                Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press && k.code == KeyCode::Char('q') => {
+                    if quit_pending {
+                        break;
+                    } else {
+                        quit_pending = true;
+                        quit_time = std::time::Instant::now();
+                    }
+                }
                 Event::Resize(_, _) => terminal.autoresize()?,
                 _ => {}
             }
