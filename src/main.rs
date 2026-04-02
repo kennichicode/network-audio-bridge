@@ -663,9 +663,9 @@ fn run_tui(
                 Color::Reset
             };
             let stats_line = if quit_pending {
-                format!(" 送信: {:>8}   送信エラー: {:>4}   ロス: {:>4}   [q] もう一度で終了", sent, send_err, loss)
+                format!(" 送信: {:>8}pkt   エラー: {:>4}   ロス: {:>4}pkt   [q] もう一度で終了", sent, send_err, loss)
             } else {
-                format!(" 送信: {:>8}   送信エラー: {:>4}   ロス: {:>4}   [q] 終了", sent, send_err, loss)
+                format!(" 送信: {:>8}pkt   エラー: {:>4}   ロス: {:>4}pkt   [q] 終了", sent, send_err, loss)
             };
             f.render_widget(
                 Paragraph::new(stats_line)
