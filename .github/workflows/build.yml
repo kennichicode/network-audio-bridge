@@ -57,27 +57,10 @@ jobs:
           gh release create latest \
             --repo ${{ github.repository }} \
             --title "Latest Build" \
-            --notes "$(cat <<'EOF'
-          ## ダウンロード方法
-
-          ### Windows
-          1. `nab.exe` と `start.bat` を同じフォルダに置く
-          2. `start.bat` をダブルクリック → ターミナルが開いてウィザードが起動
-
-          ### Mac
-          1. `nab` と `start.command` を同じフォルダに置く
-          2. `start.command` をダブルクリック → ターミナルが開いてウィザードが起動
-             （初回のみ「開発元を確認できない」と出たら 右クリック→開く）
-
-          ## PowerShell 1行インストール（Windows）
-          ```
-          irm https://github.com/kennichicode/network-audio-bridge/releases/latest/download/nab.exe -OutFile "$HOME\nab.exe"
-          ```
-          EOF
-          )" \
-            "artifacts/macos/nab#nab（Mac用）" \
-            "artifacts/macos/start.command#start.command（Macランチャー）" \
-            "artifacts/windows/nab.exe#nab.exe（Windows用）" \
-            "artifacts/windows/start.bat#start.bat（Windowsランチャー）"
+            --notes "see README" \
+            "artifacts/macos/nab#nab" \
+            "artifacts/macos/start.command#start.command" \
+            "artifacts/windows/nab.exe#nab.exe" \
+            "artifacts/windows/start.bat#start.bat"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
