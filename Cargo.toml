@@ -7,8 +7,11 @@ edition = "2021"
 name = "nab"
 path = "src/main.rs"
 
+[features]
+asio = ["cpal/asio"]
+
 [dependencies]
-cpal = "0.15"
+cpal = { version = "0.15", features = [] }
 ringbuf = "0.3"
 byteorder = "1.5"
 clap = { version = "4", features = ["derive"] }
