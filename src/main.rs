@@ -393,11 +393,11 @@ fn run_receiver(
                 for sample in data.iter_mut().skip(read_len) {
                     *sample = 0.0;
                 }
-                // バッファ使用率をコールバック内で更新（prod.len()は不可なので近似値）
-                let fill = (data.len() - read_len) * 100 / data.len().max(1);
+                // 満足率：要求サンプルのうち何%をリングバッファから供給できたか
+                let pct = read_len * 100 / data.len().max(1);
                 state_for_cb
                     .recv_buffer_pct
-                    .store(100 - fill.min(100), Ordering::Relaxed);
+                    .store(pct.min(100), Ordering::Relaxed);
             },
             err_fn,
             None,
