@@ -60,6 +60,9 @@ struct SharedState {
     packet_loss: AtomicU64,
     send_buffer_pct: AtomicUsize,
     recv_buffer_pct: AtomicUsize,
+    jitter_buffer_ms: AtomicUsize,
+    recv_buffer_ms: AtomicUsize,
+    bandwidth_kbps: AtomicUsize,
     running: AtomicBool,
 }
 impl SharedState {
@@ -70,6 +73,9 @@ impl SharedState {
             packet_loss: AtomicU64::new(0),
             send_buffer_pct: AtomicUsize::new(0),
             recv_buffer_pct: AtomicUsize::new(0),
+            jitter_buffer_ms: AtomicUsize::new(100),
+            recv_buffer_ms: AtomicUsize::new(0),
+            bandwidth_kbps: AtomicUsize::new(0),
             running: AtomicBool::new(true),
         }
     }
@@ -552,6 +558,9 @@ fn run_tui(
         let loss = state.packet_loss.load(Ordering::Relaxed);
         let send_p = state.send_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
         let recv_p = state.recv_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
+        let jitter_ms = state.jitter_buffer_ms.load(Ordering::Relaxed);
+        let buf_ms = state.recv_buffer_ms.load(Ordering::Relaxed);
+        let bw_kbps = state.bandwidth_kbps.load(Ordering::Relaxed);
 
         terminal.draw(|f| {
             let rows = Layout::default()
@@ -560,6 +569,7 @@ fn run_tui(
                 .constraints([
                     Constraint::Length(3),
                     Constraint::Length(4),
+                    Constraint::Length(3),
                     Constraint::Length(3),
                     Constraint::Length(3),
                     Constraint::Length(3),
@@ -632,6 +642,21 @@ fn run_tui(
                 rows[3],
             );
 
+            let bw_str = if bw_kbps >= 1000 {
+                format!("{:.1} Mbps", bw_kbps as f64 / 1000.0)
+            } else {
+                format!("{} kbps", bw_kbps)
+            };
+            f.render_widget(
+                Paragraph::new(format!(
+                    " 目標レイテンシー: {}ms   バッファ: {}ms   帯域: {}   [+][-] バッファ調整",
+                    jitter_ms, buf_ms, bw_str
+                ))
+                .block(Block::default().title("ネットワーク").borders(Borders::ALL))
+                .style(Style::default().fg(Color::Cyan)),
+                rows[4],
+            );
+
             let stats_color = if send_err > 0 {
                 Color::Red
             } else {
@@ -646,7 +671,7 @@ fn run_tui(
                 Paragraph::new(stats_line)
                 .block(Block::default().title("統計").borders(Borders::ALL))
                 .style(Style::default().fg(if quit_pending { Color::Yellow } else { stats_color })),
-                rows[4],
+                rows[5],
             );
         })?;
 
@@ -659,6 +684,14 @@ fn run_tui(
                         quit_pending = true;
                         quit_time = std::time::Instant::now();
                     }
+                }
+                Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press && (k.code == KeyCode::Char('+') || k.code == KeyCode::Char('=')) => {
+                    let cur = state.jitter_buffer_ms.load(Ordering::Relaxed);
+                    state.jitter_buffer_ms.store((cur + 10).min(500), Ordering::Relaxed);
+                }
+                Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press && k.code == KeyCode::Char('-') => {
+                    let cur = state.jitter_buffer_ms.load(Ordering::Relaxed);
+                    state.jitter_buffer_ms.store(cur.saturating_sub(10).max(50), Ordering::Relaxed);
                 }
                 Event::Resize(_, _) => terminal.autoresize()?,
                 _ => {}
@@ -740,6 +773,8 @@ fn run_sender(
     let mut buf = vec![0.0f32; frame];
     let mut pkt = vec![0u8; PACKET_BYTES];
     let mut seq: u32 = 0;
+    let mut bw_timer = std::time::Instant::now();
+    let mut bw_last_sent: u64 = 0;
 
     while state.running.load(Ordering::Relaxed) {
         state
@@ -766,6 +801,15 @@ fn run_sender(
             seq = seq.wrapping_add(1);
         } else {
             thread::sleep(Duration::from_micros(500));
+        }
+
+        // 帯域計算（1秒ごとに更新）
+        if bw_timer.elapsed() >= Duration::from_secs(1) {
+            let current = state.packets_sent.load(Ordering::Relaxed);
+            let kbps = current.saturating_sub(bw_last_sent) * PACKET_BYTES as u64 * 8 / 1000;
+            state.bandwidth_kbps.store(kbps as usize, Ordering::Relaxed);
+            bw_timer = std::time::Instant::now();
+            bw_last_sent = current;
         }
     }
 }
@@ -819,17 +863,25 @@ fn run_receiver(
     let rb = HeapRb::<f32>::new(SAMPLE_RATE as usize * 2 * ch);
     let (mut prod, mut cons) = rb.split();
 
+    let rebuffering = Arc::new(AtomicBool::new(true));
+    let rebuffering_cb = Arc::clone(&rebuffering);
     let state_cb = Arc::clone(&state);
+
     let stream = match device.build_output_stream(
         &cfg,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let read = cons.pop_slice(data);
-            for s in data.iter_mut().skip(read) {
-                *s = 0.0;
+            if rebuffering_cb.load(Ordering::Relaxed) {
+                for s in data.iter_mut() { *s = 0.0; }
+                state_cb.recv_buffer_pct.store(0, Ordering::Relaxed);
+                return;
             }
-            state_cb
-                .recv_buffer_pct
-                .store(read * 100 / data.len().max(1), Ordering::Relaxed);
+            let read = cons.pop_slice(data);
+            for s in data.iter_mut().skip(read) { *s = 0.0; }
+            if read == 0 {
+                // アンダーラン — 再バッファリング開始
+                rebuffering_cb.store(true, Ordering::Relaxed);
+            }
+            state_cb.recv_buffer_pct.store(read * 100 / data.len().max(1), Ordering::Relaxed);
         },
         |e| eprintln!("出力エラー: {}", e),
         None,
@@ -845,7 +897,6 @@ fn run_receiver(
     let mut pkt = vec![0u8; PACKET_BYTES];
     let mut expected: Option<u32> = None;
     let mut playing = false;
-    let prebuffer = 40 * PACKET_SAMPLES * ch; // ~106ms分溜めてから再生開始
 
     while state.running.load(Ordering::Relaxed) {
         match socket.recv_from(&mut pkt) {
@@ -860,9 +911,7 @@ fn run_receiver(
                     if diff > 0 {
                         // ロス補完: 最大32パケット分の無音を挿入（無限ループ防止）
                         let fill = diff.min(32) as usize * PACKET_SAMPLES * ch;
-                        for _ in 0..fill {
-                            let _ = prod.push(0.0);
-                        }
+                        for _ in 0..fill { let _ = prod.push(0.0); }
                         state.packet_loss.fetch_add(diff as u64, Ordering::Relaxed);
                     }
                 }
@@ -873,12 +922,22 @@ fn run_receiver(
             }
             _ => {}
         }
-        if !playing && prod.len() >= prebuffer {
-            if let Err(e) = stream.play() {
-                eprintln!("出力ストリーム開始失敗: {}", e);
-                break;
+
+        // バッファ残量をmsに変換して報告
+        let buf_ms = prod.len() * 1000 / (SAMPLE_RATE as usize * ch);
+        state.recv_buffer_ms.store(buf_ms, Ordering::Relaxed);
+
+        // ジッターバッファ分溜まったら再生開始（または再開）
+        let jitter_samples = state.jitter_buffer_ms.load(Ordering::Relaxed) * SAMPLE_RATE as usize / 1000 * ch;
+        if rebuffering.load(Ordering::Relaxed) && prod.len() >= jitter_samples {
+            rebuffering.store(false, Ordering::Relaxed);
+            if !playing {
+                if let Err(e) = stream.play() {
+                    eprintln!("出力ストリーム開始失敗: {}", e);
+                    break;
+                }
+                playing = true;
             }
-            playing = true;
         }
     }
 }
