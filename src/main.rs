@@ -27,7 +27,7 @@ const DEFAULT_PORT: u16 = 8000;
 const PACKET_BYTES: usize = 4 + (PACKET_SAMPLES * CHANNELS as usize * 4);
 
 // ───────────────────────────────────────────────
-// データ型
+// Types
 // ───────────────────────────────────────────────
 
 #[derive(Clone, PartialEq)]
@@ -134,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app_result = run_app(&host, &input_devices, &output_devices, &mut terminal);
     if let Err(e) = cleanup(&mut terminal) {
-        eprintln!("ターミナル復旧失敗: {}", e);
+        eprintln!("Terminal restore failed: {}", e);
     }
     if let Err(e) = app_result {
         eprintln!("{}", e);
@@ -211,7 +211,7 @@ fn stream_config(sample_rate: u32) -> cpal::StreamConfig {
 fn device_name(device: &cpal::Device) -> String {
     device
         .name()
-        .unwrap_or_else(|_| "不明なデバイス".to_string())
+        .unwrap_or_else(|_| "Unknown device".to_string())
 }
 
 fn select_input_device(
@@ -221,14 +221,14 @@ fn select_input_device(
     let selected = match selected_name {
         Some(name) => host
             .input_devices()
-            .map_err(|e| format!("入力デバイス一覧の取得に失敗: {}", e))?
+            .map_err(|e| format!("Failed to list input devices: {}", e))?
             .find(|d| d.name().ok().as_deref() == Some(name)),
         None => None,
     };
 
     selected
         .or_else(|| host.default_input_device())
-        .ok_or_else(|| "エラー: 入力デバイスが見つかりません".to_string())
+        .ok_or_else(|| "Error: no input device found".to_string())
 }
 
 fn select_output_device(
@@ -238,20 +238,20 @@ fn select_output_device(
     let selected = match selected_name {
         Some(name) => host
             .output_devices()
-            .map_err(|e| format!("出力デバイス一覧の取得に失敗: {}", e))?
+            .map_err(|e| format!("Failed to list output devices: {}", e))?
             .find(|d| d.name().ok().as_deref() == Some(name)),
         None => None,
     };
 
     selected
         .or_else(|| host.default_output_device())
-        .ok_or_else(|| "エラー: 出力デバイスが見つかりません".to_string())
+        .ok_or_else(|| "Error: no output device found".to_string())
 }
 
 fn ensure_input_support(device: &cpal::Device, sample_rate: u32) -> Result<(), String> {
     let mut configs = device.supported_input_configs().map_err(|e| {
         format!(
-            "入力デバイス「{}」の対応フォーマット取得に失敗: {}",
+            "Failed to get supported formats for input \"{}\": {}",
             device_name(device),
             e
         )
@@ -267,7 +267,7 @@ fn ensure_input_support(device: &cpal::Device, sample_rate: u32) -> Result<(), S
         Ok(())
     } else {
         Err(format!(
-            "エラー: 入力デバイス「{}」は {}kHz / ステレオ / f32 に対応していません。\nデバイスのサンプルレート設定を確認してください。",
+            "Error: input \"{}\" does not support {}kHz / stereo / f32.\nCheck device sample rate settings.",
             device_name(device), sample_rate / 1000
         ))
     }
@@ -276,7 +276,7 @@ fn ensure_input_support(device: &cpal::Device, sample_rate: u32) -> Result<(), S
 fn ensure_output_support(device: &cpal::Device, sample_rate: u32) -> Result<(), String> {
     let mut configs = device.supported_output_configs().map_err(|e| {
         format!(
-            "出力デバイス「{}」の対応フォーマット取得に失敗: {}",
+            "Failed to get supported formats for output \"{}\": {}",
             device_name(device),
             e
         )
@@ -292,14 +292,14 @@ fn ensure_output_support(device: &cpal::Device, sample_rate: u32) -> Result<(), 
         Ok(())
     } else {
         Err(format!(
-            "エラー: 出力デバイス「{}」は {}kHz / ステレオ / f32 に対応していません。\nデバイスのサンプルレート設定を確認してください。",
+            "Error: output \"{}\" does not support {}kHz / stereo / f32.\nCheck device sample rate settings.",
             device_name(device), sample_rate / 1000
         ))
     }
 }
 
 // ───────────────────────────────────────────────
-// ウィザード
+// Wizard
 // ───────────────────────────────────────────────
 
 fn run_wizard(
@@ -424,7 +424,7 @@ fn run_wizard(
 
 fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
     let outer = Block::default()
-        .title(" Network Audio Bridge — セットアップ ")
+        .title(" Network Audio Bridge — Setup ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
     f.render_widget(outer, f.area());
@@ -442,13 +442,13 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
     match step {
         WizardStep::SelectMode { cursor } => {
             f.render_widget(
-                Paragraph::new("モードを選択").style(Style::default().fg(Color::Yellow)),
+                Paragraph::new("Select mode").style(Style::default().fg(Color::Yellow)),
                 layout[0],
             );
             let modes = [
-                "送信   — このデバイスの音を相手に送る",
-                "受信   — 相手の音をこのデバイスで聴く",
-                "双方向 — 送受信を同時に行う",
+                "Send   — stream audio from this device",
+                "Receive — play audio from remote",
+                "Duplex  — send and receive simultaneously",
             ];
             let items: Vec<ListItem> = modes
                 .iter()
@@ -466,18 +466,18 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
             s.select(Some(*cursor));
             f.render_stateful_widget(List::new(items), layout[1], &mut s);
             f.render_widget(
-                Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了")
+                Paragraph::new("↑↓ Select   Enter Confirm   Esc Quit")
                     .style(Style::default().fg(Color::DarkGray)),
                 layout[2],
             );
         }
         WizardStep::SelectSampleRate { cursor } => {
             f.render_widget(
-                Paragraph::new("サンプルレートを選択  ※送受信で同じレートを選んでください")
+                Paragraph::new("Select sample rate  * Both sides must use the same rate")
                     .style(Style::default().fg(Color::Yellow)),
                 layout[0],
             );
-            let rates = ["44.1 kHz", "48 kHz  （デフォルト）", "96 kHz"];
+            let rates = ["44.1 kHz", "48 kHz  (default)", "96 kHz"];
             let items: Vec<ListItem> = rates
                 .iter()
                 .enumerate()
@@ -494,14 +494,14 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
             s.select(Some(*cursor));
             f.render_stateful_widget(List::new(items), layout[1], &mut s);
             f.render_widget(
-                Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了")
+                Paragraph::new("↑↓ Select   Enter Confirm   Esc Quit")
                     .style(Style::default().fg(Color::DarkGray)),
                 layout[2],
             );
         }
         WizardStep::SelectInput { devices, cursor } => {
             f.render_widget(
-                Paragraph::new("入力デバイス（マイク・インターフェース）を選択")
+                Paragraph::new("Select input device (mic / interface)")
                     .style(Style::default().fg(Color::Yellow)),
                 layout[0],
             );
@@ -521,14 +521,14 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
             s.select(Some(*cursor));
             f.render_stateful_widget(List::new(items), layout[1], &mut s);
             f.render_widget(
-                Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了")
+                Paragraph::new("↑↓ Select   Enter Confirm   Esc Quit")
                     .style(Style::default().fg(Color::DarkGray)),
                 layout[2],
             );
         }
         WizardStep::SelectOutput { devices, cursor } => {
             f.render_widget(
-                Paragraph::new("出力デバイス（スピーカー・インターフェース）を選択")
+                Paragraph::new("Select output device (speakers / interface)")
                     .style(Style::default().fg(Color::Yellow)),
                 layout[0],
             );
@@ -548,14 +548,14 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
             s.select(Some(*cursor));
             f.render_stateful_widget(List::new(items), layout[1], &mut s);
             f.render_widget(
-                Paragraph::new("↑↓ 選択   Enter 決定   Esc 終了")
+                Paragraph::new("↑↓ Select   Enter Confirm   Esc Quit")
                     .style(Style::default().fg(Color::DarkGray)),
                 layout[2],
             );
         }
         WizardStep::EnterIP { buf } => {
             f.render_widget(
-                Paragraph::new("相手のIPアドレスを入力  （例: 192.168.1.100）")
+                Paragraph::new("Enter remote IP address  (e.g. 192.168.1.100)")
                     .style(Style::default().fg(Color::Yellow)),
                 layout[0],
             );
@@ -568,7 +568,7 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
                 layout[1],
             );
             f.render_widget(
-                Paragraph::new("Enter 決定   Esc 終了").style(Style::default().fg(Color::DarkGray)),
+                Paragraph::new("Enter Confirm   Esc Quit").style(Style::default().fg(Color::DarkGray)),
                 layout[2],
             );
         }
@@ -576,7 +576,7 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
 }
 
 // ───────────────────────────────────────────────
-// メインTUI（動作中）
+// Main TUI (running)
 // ───────────────────────────────────────────────
 
 fn run_tui(
@@ -585,9 +585,9 @@ fn run_tui(
     state: &Arc<SharedState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode_label = match config.mode {
-        RunMode::Send => "送信",
-        RunMode::Recv => "受信",
-        RunMode::Duplex => "双方向",
+        RunMode::Send => "Send",
+        RunMode::Recv => "Receive",
+        RunMode::Duplex => "Duplex",
     };
     let is_send = matches!(config.mode, RunMode::Send | RunMode::Duplex);
     let is_recv = matches!(config.mode, RunMode::Recv | RunMode::Duplex);
@@ -627,7 +627,7 @@ fn run_tui(
                 format!("← {}", config.listen_addr)
             };
             f.render_widget(
-                Paragraph::new(format!(" {}  {}  ● 動作中", mode_label, conn))
+                Paragraph::new(format!(" {}  {}  ● Running", mode_label, conn))
                     .block(
                         Block::default()
                             .title("Network Audio Bridge")
@@ -639,11 +639,11 @@ fn run_tui(
 
             f.render_widget(
                 Paragraph::new(format!(
-                    " 入力 : {}\n 出力 : {}",
+                    " In  : {}\n Out : {}",
                     config.input_device.as_deref().unwrap_or("—"),
                     config.output_device.as_deref().unwrap_or("—"),
                 ))
-                .block(Block::default().title("デバイス").borders(Borders::ALL)),
+                .block(Block::default().title("Devices").borders(Borders::ALL)),
                 rows[1],
             );
 
@@ -652,9 +652,9 @@ fn run_tui(
                     .block(
                         Block::default()
                             .title(if is_send {
-                                "送信バッファ"
+                                "Send Buffer"
                             } else {
-                                "送信（未使用）"
+                                "Send (unused)"
                             })
                             .borders(Borders::ALL),
                     )
@@ -672,9 +672,9 @@ fn run_tui(
                     .block(
                         Block::default()
                             .title(if is_recv {
-                                "受信バッファ"
+                                "Recv Buffer"
                             } else {
-                                "受信（未使用）"
+                                "Recv (unused)"
                             })
                             .borders(Borders::ALL),
                     )
@@ -694,10 +694,10 @@ fn run_tui(
             };
             f.render_widget(
                 Paragraph::new(format!(
-                    " {}kHz / {}ch / f32   目標: {}ms   バッファ: {}ms   帯域: {}   [+][-]",
+                    " {}kHz / {}ch / f32   Target: {}ms   Buffer: {}ms   BW: {}   [+][-]",
                     config.sample_rate / 1000, CHANNELS, jitter_ms, buf_ms, bw_str
                 ))
-                .block(Block::default().title("ネットワーク").borders(Borders::ALL))
+                .block(Block::default().title("Network").borders(Borders::ALL))
                 .style(Style::default().fg(Color::Cyan)),
                 rows[4],
             );
@@ -708,13 +708,13 @@ fn run_tui(
                 Color::Reset
             };
             let stats_line = if quit_pending {
-                format!(" 送信: {:>8}pkt   エラー: {:>4}   ロス: {:>4}pkt   [q] もう一度で終了", sent, send_err, loss)
+                format!(" Sent: {:>8}pkt   Err: {:>4}   Loss: {:>4}pkt   [q] press again to quit", sent, send_err, loss)
             } else {
-                format!(" 送信: {:>8}pkt   エラー: {:>4}   ロス: {:>4}pkt   [q] 終了", sent, send_err, loss)
+                format!(" Sent: {:>8}pkt   Err: {:>4}   Loss: {:>4}pkt   [q] Quit", sent, send_err, loss)
             };
             f.render_widget(
                 Paragraph::new(stats_line)
-                .block(Block::default().title("統計").borders(Borders::ALL))
+                .block(Block::default().title("Stats").borders(Borders::ALL))
                 .style(Style::default().fg(if quit_pending { Color::Yellow } else { stats_color })),
                 rows[5],
             );
@@ -747,7 +747,7 @@ fn run_tui(
 }
 
 // ───────────────────────────────────────────────
-// オーディオ送信
+// Audio send
 // ───────────────────────────────────────────────
 
 fn spawn_sender(
@@ -767,7 +767,7 @@ fn spawn_sender(
         }
         Err(_) => {
             let _ = handle.join();
-            Err("送信スレッドの起動確認に失敗しました".to_string())
+            Err("Send thread failed to start".to_string())
         }
     }
 }
@@ -792,24 +792,24 @@ fn run_sender(
                 let _ = prod.push(s);
             }
         },
-        |e| eprintln!("入力エラー: {}", e),
+        |e| eprintln!("Input error: {}", e),
         None,
     ) {
         Ok(s) => s,
         Err(e) => {
-            let _ = ready_tx.send(Err(format!("入力ストリーム構築失敗: {}", e)));
+            let _ = ready_tx.send(Err(format!("Input stream build failed: {}", e)));
             return;
         }
     };
     if let Err(e) = stream.play() {
-        let _ = ready_tx.send(Err(format!("入力ストリーム開始失敗: {}", e)));
+        let _ = ready_tx.send(Err(format!("Input stream start failed: {}", e)));
         return;
     }
 
     let socket = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
         Err(e) => {
-            let _ = ready_tx.send(Err(format!("送信ソケット失敗: {}", e)));
+            let _ = ready_tx.send(Err(format!("Send socket failed: {}", e)));
             return;
         }
     };
@@ -861,7 +861,7 @@ fn run_sender(
 }
 
 // ───────────────────────────────────────────────
-// オーディオ受信
+// Audio receive
 // ───────────────────────────────────────────────
 
 fn spawn_receiver(
@@ -881,7 +881,7 @@ fn spawn_receiver(
         }
         Err(_) => {
             let _ = handle.join();
-            Err("受信スレッドの起動確認に失敗しました".to_string())
+            Err("Recv thread failed to start".to_string())
         }
     }
 }
@@ -897,12 +897,12 @@ fn run_receiver(
     let socket = match UdpSocket::bind(&listen) {
         Ok(s) => s,
         Err(e) => {
-            let _ = ready_tx.send(Err(format!("受信ソケット失敗: {}", e)));
+            let _ = ready_tx.send(Err(format!("Recv socket failed: {}", e)));
             return;
         }
     };
     if let Err(e) = socket.set_read_timeout(Some(Duration::from_millis(100))) {
-        let _ = ready_tx.send(Err(format!("受信ソケット設定失敗: {}", e)));
+        let _ = ready_tx.send(Err(format!("Recv socket config failed: {}", e)));
         return;
     }
 
@@ -930,12 +930,12 @@ fn run_receiver(
             }
             state_cb.recv_buffer_pct.store(read * 100 / data.len().max(1), Ordering::Relaxed);
         },
-        |e| eprintln!("出力エラー: {}", e),
+        |e| eprintln!("Output error: {}", e),
         None,
     ) {
         Ok(s) => s,
         Err(e) => {
-            let _ = ready_tx.send(Err(format!("出力ストリーム構築失敗: {}", e)));
+            let _ = ready_tx.send(Err(format!("Output stream build failed: {}", e)));
             return;
         }
     };
@@ -980,7 +980,7 @@ fn run_receiver(
             rebuffering.store(false, Ordering::Relaxed);
             if !playing {
                 if let Err(e) = stream.play() {
-                    eprintln!("出力ストリーム開始失敗: {}", e);
+                    eprintln!("Output stream start failed: {}", e);
                     break;
                 }
                 playing = true;
