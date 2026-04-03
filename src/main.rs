@@ -345,12 +345,15 @@ fn run_wizard(
 
                 WizardStep::SelectSampleRate { cursor } => match key.code {
                     KeyCode::Up => *cursor = cursor.saturating_sub(1),
-                    KeyCode::Down => *cursor = (*cursor + 1).min(2),
+                    KeyCode::Down => *cursor = (*cursor + 1).min(5),
                     KeyCode::Enter => {
                         config.sample_rate = match *cursor {
                             0 => 44100,
                             1 => 48000,
-                            _ => 96000,
+                            2 => 88200,
+                            3 => 96000,
+                            4 => 176400,
+                            _ => 192000,
                         };
                         step = if config.mode != RunMode::Recv {
                             WizardStep::SelectInput {
@@ -477,7 +480,7 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
                     .style(Style::default().fg(Color::Yellow)),
                 layout[0],
             );
-            let rates = ["44.1 kHz", "48 kHz  (default)", "96 kHz"];
+            let rates = ["44.1 kHz", "48 kHz  (default)", "88.2 kHz", "96 kHz", "176.4 kHz", "192 kHz"];
             let items: Vec<ListItem> = rates
                 .iter()
                 .enumerate()

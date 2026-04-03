@@ -15,8 +15,10 @@ jobs:
       - run: |
           mkdir -p staging
           cp target/release/nab staging/nab
+          cp target/release/nab-recv staging/nab-recv
           cp launchers/start.command staging/start.command
-          chmod +x staging/nab staging/start.command
+          cp launchers/start-recv.command staging/start-recv.command
+          chmod +x staging/nab staging/nab-recv staging/start.command staging/start-recv.command
       - uses: actions/upload-artifact@v4
         with:
           name: nab-macos
@@ -31,7 +33,9 @@ jobs:
       - run: |
           mkdir staging
           copy target\release\nab.exe staging\nab.exe
+          copy target\release\nab-recv.exe staging\nab-recv.exe
           copy launchers\start.bat staging\start.bat
+          copy launchers\start-recv.bat staging\start-recv.bat
         shell: cmd
       - uses: actions/upload-artifact@v4
         with:
@@ -52,7 +56,7 @@ jobs:
         with:
           name: nab-windows
           path: artifacts/windows
-      - run: chmod +x artifacts/macos/nab artifacts/macos/start.command
+      - run: chmod +x artifacts/macos/nab artifacts/macos/nab-recv artifacts/macos/start.command artifacts/macos/start-recv.command
       - name: Delete existing latest release
         run: |
           gh release delete latest --yes --cleanup-tag --repo ${{ github.repository }} 2>/dev/null || true
@@ -67,8 +71,12 @@ jobs:
             --title "Latest Build" \
             --notes "see README" \
             "artifacts/macos/nab#nab" \
+            "artifacts/macos/nab-recv#nab-recv" \
             "artifacts/macos/start.command#start.command" \
+            "artifacts/macos/start-recv.command#start-recv.command" \
             "artifacts/windows/nab.exe#nab.exe" \
-            "artifacts/windows/start.bat#start.bat"
+            "artifacts/windows/nab-recv.exe#nab-recv.exe" \
+            "artifacts/windows/start.bat#start.bat" \
+            "artifacts/windows/start-recv.bat#start-recv.bat"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
