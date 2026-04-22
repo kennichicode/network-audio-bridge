@@ -1,10 +1,10 @@
 #!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-BIN="$SCRIPT_DIR/nab"
+BIN="$SCRIPT_DIR/nab-recv"
 
 if [ ! -f "$BIN" ]; then
     echo ""
-    echo "  nab が同じフォルダに見つかりません。"
+    echo "  nab-recv が同じフォルダに見つかりません。"
     echo "  インストールが不完全の可能性があります。"
     echo "  https://github.com/kennichicode/network-audio-bridge"
     echo ""

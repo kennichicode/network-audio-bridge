@@ -3,38 +3,21 @@ chcp 65001 >nul
 title Network Audio Bridge
 cd /d "%~dp0"
 
-set "BIN=%~dp0nab.exe"
-set "APP_DIR=%USERPROFILE%\NetworkAudioBridge"
-
-if not exist "%BIN%" (
-    if exist "%APP_DIR%\nab.exe" (
-        set "BIN=%APP_DIR%\nab.exe"
-    ) else (
-        echo.
-        echo   nab.exe が見つかりません。自動ダウンロードします...
-        if not exist "%APP_DIR%" mkdir "%APP_DIR%"
-        where curl.exe >nul 2>nul
-        if errorlevel 1 (
-            echo   curl.exe が見つかりません。Windows 10 1803 以降が必要です。
-            echo   手動ダウンロード: https://github.com/kennichicode/network-audio-bridge/releases
-            pause
-            exit /b 1
-        )
-        curl.exe -L -o "%APP_DIR%\nab.exe" "https://github.com/kennichicode/network-audio-bridge/releases/latest/download/nab.exe"
-        if errorlevel 1 (
-            echo   ダウンロードに失敗しました。インターネット接続を確認してください。
-            pause
-            exit /b 1
-        )
-        set "BIN=%APP_DIR%\nab.exe"
-    )
+if not exist "%~dp0nab.exe" (
+    echo.
+    echo   nab.exe が同じフォルダに見つかりません。
+    echo   インストールが不完全の可能性があります。
+    echo   https://github.com/kennichicode/network-audio-bridge
+    echo.
+    pause
+    exit /b 1
 )
 
-"%BIN%"
+"%~dp0nab.exe"
 if errorlevel 1 (
     echo.
     echo ====================================================
-    echo   エラーが発生しました（詳細は上のメッセージを確認）
+    echo   エラーで終了しました（上のメッセージを確認）
     echo   ログ: %USERPROFILE%\.nab\log.txt
     echo ====================================================
     pause
