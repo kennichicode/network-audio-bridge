@@ -581,10 +581,13 @@ fn run_tui(
     };
     let is_send = matches!(config.mode, RunMode::Send | RunMode::Duplex);
     let is_recv = matches!(config.mode, RunMode::Recv | RunMode::Duplex);
-    let my_ip = if is_recv {
-        netinfo::local_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "?.?.?.?".to_string())
+    let (my_ip, other_ips) = if is_recv {
+        let cands = netinfo::candidate_ipv4s();
+        let primary = cands.first().map(|ip| ip.to_string()).unwrap_or_else(|| "?.?.?.?".to_string());
+        let others: Vec<String> = cands.iter().skip(1).map(|ip| ip.to_string()).collect();
+        (primary, others)
     } else {
-        String::new()
+        (String::new(), Vec::new())
     };
     let mut quit_pending = false;
     let mut quit_time = std::time::Instant::now();
@@ -621,7 +624,11 @@ fn run_tui(
                 format!("→ {}", config.remote_addr)
             } else {
                 let port = config.listen_addr.rsplit(':').next().unwrap_or("8000");
-                format!("← このマシンのアドレス: {}:{}  (送信側で入力)", my_ip, port)
+                if other_ips.is_empty() {
+                    format!("← このマシンのアドレス: {}:{}  (送信側で入力)", my_ip, port)
+                } else {
+                    format!("← このマシンのアドレス: {}:{}  (他候補: {})", my_ip, port, other_ips.join(", "))
+                }
             };
             f.render_widget(
                 Paragraph::new(format!(" {}  {}  ● Running", mode_label, conn))

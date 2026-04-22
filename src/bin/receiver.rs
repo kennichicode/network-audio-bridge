@@ -138,9 +138,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sr = config.sample_rate as usize;
     let port = config.port;
     let sample_rate = config.sample_rate;
-    let my_ip = netinfo::local_ip()
+    let ip_candidates = netinfo::candidate_ipv4s();
+    let my_ip = ip_candidates
+        .first()
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "?.?.?.?".to_string());
+    let other_ips: Vec<String> = ip_candidates
+        .iter()
+        .skip(1)
+        .map(|ip| ip.to_string())
+        .collect();
 
     let device = {
         let selected = config.output_device.as_deref().and_then(|name| {
@@ -407,10 +414,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 ("PLAYING", Color::Green)
             };
+            let addr_line = if other_ips.is_empty() {
+                format!("受信アドレス: {}:{}", my_ip, port)
+            } else {
+                format!("受信アドレス: {}:{}   (他候補: {})", my_ip, port, other_ips.join(", "))
+            };
             f.render_widget(
                 Paragraph::new(format!(
-                    "NAB Receiver v2  │  受信アドレス: {}:{}  │  {} Hz  │  {}",
-                    my_ip, port, sample_rate, status_text
+                    "NAB Receiver v2  │  {}  │  {} Hz  │  {}",
+                    addr_line, sample_rate, status_text
                 ))
                 .block(Block::default().borders(Borders::ALL).title(" Status  (送信側でこのアドレスを入力) "))
                 .style(Style::default().fg(status_color)),
@@ -648,15 +660,20 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
             );
         }
         WizardStep::EnterPort { buf } => {
-            let my_ip = netinfo::local_ip()
-                .map(|ip| ip.to_string())
-                .unwrap_or_else(|| "?.?.?.?".to_string());
+            let cands = netinfo::candidate_ipv4s();
+            let primary = cands.first().map(|ip| ip.to_string()).unwrap_or_else(|| "?.?.?.?".to_string());
+            let extra: String = if cands.len() > 1 {
+                let others: Vec<String> = cands.iter().skip(1).map(|ip| ip.to_string()).collect();
+                format!("  (他候補: {})", others.join(", "))
+            } else {
+                String::new()
+            };
             f.render_widget(
                 Paragraph::new(format!(
                     "待ち受けるポート番号（IPアドレスではありません）\n\
-                     送信側には「{}:{}」を入力してもらう想定です。\n\
+                     送信側には「{}:{}」を入力してもらう想定です。{}\n\
                      番号を変える必要がなければ Enter だけでOK（既定 {}）。",
-                    my_ip, DEFAULT_PORT, DEFAULT_PORT
+                    primary, DEFAULT_PORT, extra, DEFAULT_PORT
                 ))
                 .style(Style::default().fg(Color::Yellow)),
                 layout[0],
