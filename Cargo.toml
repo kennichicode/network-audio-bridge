@@ -19,8 +19,6 @@ ratatui = "0.29"
 crossterm = "0.28"
 rubato = "0.16"
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock", "Win32_Foundation"] }
 
 [[bin]]
 name = "nab-recv"
