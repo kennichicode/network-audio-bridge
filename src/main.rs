@@ -20,15 +20,15 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-// MTU(1500) - IP(20) - UDP(8) - seq(4) = 1468 bytes → 128 stereo f32 = 1028 bytes < 1500 ✓
-const PACKET_SAMPLES: usize = 128;
+mod log;
+mod netopts;
+mod packet;
+
+use packet::{packet_bytes, parse_header, write_header, HEADER_BYTES, PACKET_SAMPLES, ParseError};
+
 const CHANNELS: u16 = 2;
 const DEFAULT_PORT: u16 = 8000;
-const PACKET_BYTES: usize = 4 + (PACKET_SAMPLES * CHANNELS as usize * 4);
-
-// ───────────────────────────────────────────────
-// Types
-// ───────────────────────────────────────────────
+const PACKET_BYTES: usize = packet_bytes(CHANNELS as usize);
 
 #[derive(Clone, PartialEq)]
 enum RunMode {
@@ -59,6 +59,7 @@ struct SharedState {
     packets_sent: AtomicU64,
     send_errors: AtomicU64,
     packet_loss: AtomicU64,
+    buf_overflow: AtomicU64,
     send_buffer_pct: AtomicUsize,
     recv_buffer_pct: AtomicUsize,
     jitter_buffer_ms: AtomicUsize,
@@ -72,6 +73,7 @@ impl SharedState {
             packets_sent: AtomicU64::new(0),
             send_errors: AtomicU64::new(0),
             packet_loss: AtomicU64::new(0),
+            buf_overflow: AtomicU64::new(0),
             send_buffer_pct: AtomicUsize::new(0),
             recv_buffer_pct: AtomicUsize::new(0),
             jitter_buffer_ms: AtomicUsize::new(100),
@@ -82,30 +84,17 @@ impl SharedState {
     }
 }
 
-// ───────────────────────────────────────────────
-// main
-// ───────────────────────────────────────────────
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // パニック時にターミナルを必ず復旧する
+    log::init("nab");
+
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        log::log(&format!("PANIC: {}", info));
         default_hook(info);
     }));
 
-    #[cfg(all(feature = "asio", target_os = "windows"))]
-    let host = {
-        let asio_id = cpal::available_hosts()
-            .into_iter()
-            .find(|id| *id == cpal::HostId::Asio);
-        match asio_id {
-            Some(id) => cpal::host_from_id(id).unwrap_or_else(|_| cpal::default_host()),
-            None => cpal::default_host(),
-        }
-    };
-    #[cfg(not(all(feature = "asio", target_os = "windows")))]
     let host = cpal::default_host();
 
     let input_devices: Vec<String> = host
@@ -137,6 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Terminal restore failed: {}", e);
     }
     if let Err(e) = app_result {
+        log::log(&format!("app error: {}", e));
         eprintln!("{}", e);
         std::process::exit(1);
     }
@@ -191,10 +181,14 @@ fn run_app(
 
     state.running.store(false, Ordering::Relaxed);
     if let Some(t) = send_thread {
-        let _ = t.join();
+        if let Err(e) = t.join() {
+            log::log(&format!("send thread panic: {:?}", e));
+        }
     }
     if let Some(t) = recv_thread {
-        let _ = t.join();
+        if let Err(e) = t.join() {
+            log::log(&format!("recv thread panic: {:?}", e));
+        }
     }
 
     result
@@ -298,10 +292,6 @@ fn ensure_output_support(device: &cpal::Device, sample_rate: u32) -> Result<(), 
     }
 }
 
-// ───────────────────────────────────────────────
-// Wizard
-// ───────────────────────────────────────────────
-
 fn run_wizard(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     input_devices: &[String],
@@ -337,7 +327,7 @@ fn run_wizard(
                             1 => RunMode::Recv,
                             _ => RunMode::Duplex,
                         };
-                        step = WizardStep::SelectSampleRate { cursor: 1 }; // デフォルト48kHz
+                        step = WizardStep::SelectSampleRate { cursor: 1 };
                     }
                     KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
                     _ => {}
@@ -578,10 +568,6 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
     }
 }
 
-// ───────────────────────────────────────────────
-// Main TUI (running)
-// ───────────────────────────────────────────────
-
 fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     config: &RunConfig,
@@ -604,6 +590,7 @@ fn run_tui(
         let sent = state.packets_sent.load(Ordering::Relaxed);
         let send_err = state.send_errors.load(Ordering::Relaxed);
         let loss = state.packet_loss.load(Ordering::Relaxed);
+        let overflow = state.buf_overflow.load(Ordering::Relaxed);
         let send_p = state.send_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
         let recv_p = state.recv_buffer_pct.load(Ordering::Relaxed).min(100) as u16;
         let jitter_ms = state.jitter_buffer_ms.load(Ordering::Relaxed);
@@ -654,18 +641,10 @@ fn run_tui(
                 Gauge::default()
                     .block(
                         Block::default()
-                            .title(if is_send {
-                                "Send Buffer"
-                            } else {
-                                "Send (unused)"
-                            })
+                            .title(if is_send { "Send Buffer" } else { "Send (unused)" })
                             .borders(Borders::ALL),
                     )
-                    .gauge_style(Style::default().fg(if is_send {
-                        Color::Cyan
-                    } else {
-                        Color::DarkGray
-                    }))
+                    .gauge_style(Style::default().fg(if is_send { Color::Cyan } else { Color::DarkGray }))
                     .percent(if is_send { send_p } else { 0 }),
                 rows[2],
             );
@@ -674,18 +653,10 @@ fn run_tui(
                 Gauge::default()
                     .block(
                         Block::default()
-                            .title(if is_recv {
-                                "Recv Buffer"
-                            } else {
-                                "Recv (unused)"
-                            })
+                            .title(if is_recv { "Recv Buffer" } else { "Recv (unused)" })
                             .borders(Borders::ALL),
                     )
-                    .gauge_style(Style::default().fg(if is_recv {
-                        Color::Green
-                    } else {
-                        Color::DarkGray
-                    }))
+                    .gauge_style(Style::default().fg(if is_recv { Color::Green } else { Color::DarkGray }))
                     .percent(if is_recv { recv_p } else { 0 }),
                 rows[3],
             );
@@ -705,15 +676,15 @@ fn run_tui(
                 rows[4],
             );
 
-            let stats_color = if send_err > 0 {
+            let stats_color = if send_err > 0 || overflow > 0 {
                 Color::Red
             } else {
                 Color::Reset
             };
             let stats_line = if quit_pending {
-                format!(" Sent: {:>8}pkt   Err: {:>4}   Loss: {:>4}pkt   [q] press again to quit", sent, send_err, loss)
+                format!(" Sent: {:>8}pkt  Err: {:>4}  Loss: {:>4}  Overflow: {:>4}   [q] press again to quit", sent, send_err, loss, overflow)
             } else {
-                format!(" Sent: {:>8}pkt   Err: {:>4}   Loss: {:>4}pkt   [q] Quit", sent, send_err, loss)
+                format!(" Sent: {:>8}pkt  Err: {:>4}  Loss: {:>4}  Overflow: {:>4}   [q] Quit", sent, send_err, loss, overflow)
             };
             f.render_widget(
                 Paragraph::new(stats_line)
@@ -748,10 +719,6 @@ fn run_tui(
     }
     Ok(())
 }
-
-// ───────────────────────────────────────────────
-// Audio send
-// ───────────────────────────────────────────────
 
 fn spawn_sender(
     device: cpal::Device,
@@ -788,14 +755,21 @@ fn run_sender(
     let rb = HeapRb::<f32>::new(capacity);
     let (mut prod, mut cons) = rb.split();
 
+    let state_cb = Arc::clone(&state);
     let stream = match device.build_input_stream(
         &cfg,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            let mut dropped = 0u64;
             for &s in data {
-                let _ = prod.push(s);
+                if prod.push(s).is_err() {
+                    dropped += 1;
+                }
+            }
+            if dropped > 0 {
+                state_cb.buf_overflow.fetch_add(dropped, Ordering::Relaxed);
             }
         },
-        |e| eprintln!("Input error: {}", e),
+        |e| log::log(&format!("input stream error: {}", e)),
         None,
     ) {
         Ok(s) => s,
@@ -816,6 +790,9 @@ fn run_sender(
             return;
         }
     };
+    if let Err(e) = netopts::disable_udp_connreset(&socket) {
+        log::log(&format!("disable_udp_connreset (sender) failed: {}", e));
+    }
     let _ = ready_tx.send(Ok(()));
 
     let frame = PACKET_SAMPLES * ch;
@@ -828,17 +805,16 @@ fn run_sender(
     while state.running.load(Ordering::Relaxed) {
         state
             .send_buffer_pct
-            .store(cons.len() * 100 / capacity, Ordering::Relaxed);
+            .store(cons.len() * 100 / capacity.max(1), Ordering::Relaxed);
         if cons.len() >= frame {
             let read = cons.pop_slice(&mut buf);
             for s in buf.iter_mut().skip(read) {
                 *s = 0.0;
             }
-            LittleEndian::write_u32(&mut pkt[0..4], seq);
+            write_header(&mut pkt[0..HEADER_BYTES], sr as u32, ch as u8, seq);
             for (i, &s) in buf.iter().enumerate() {
-                LittleEndian::write_f32(&mut pkt[4 + i * 4..4 + (i + 1) * 4], s);
+                LittleEndian::write_f32(&mut pkt[HEADER_BYTES + i * 4..HEADER_BYTES + (i + 1) * 4], s);
             }
-            // 送信成功時のみカウント、失敗は送信エラーとしてカウント
             match socket.send_to(&pkt, &target) {
                 Ok(_) => {
                     state.packets_sent.fetch_add(1, Ordering::Relaxed);
@@ -852,7 +828,6 @@ fn run_sender(
             thread::sleep(Duration::from_micros(500));
         }
 
-        // 帯域計算（1秒ごとに更新）
         if bw_timer.elapsed() >= Duration::from_secs(1) {
             let current = state.packets_sent.load(Ordering::Relaxed);
             let kbps = current.saturating_sub(bw_last_sent) * PACKET_BYTES as u64 * 8 / 1000;
@@ -862,10 +837,6 @@ fn run_sender(
         }
     }
 }
-
-// ───────────────────────────────────────────────
-// Audio receive
-// ───────────────────────────────────────────────
 
 fn spawn_receiver(
     device: cpal::Device,
@@ -904,6 +875,9 @@ fn run_receiver(
             return;
         }
     };
+    if let Err(e) = netopts::disable_udp_connreset(&socket) {
+        log::log(&format!("disable_udp_connreset (recv) failed: {}", e));
+    }
     if let Err(e) = socket.set_read_timeout(Some(Duration::from_millis(100))) {
         let _ = ready_tx.send(Err(format!("Recv socket config failed: {}", e)));
         return;
@@ -928,12 +902,11 @@ fn run_receiver(
             let read = cons.pop_slice(data);
             for s in data.iter_mut().skip(read) { *s = 0.0; }
             if read == 0 {
-                // アンダーラン — 再バッファリング開始
                 rebuffering_cb.store(true, Ordering::Relaxed);
             }
             state_cb.recv_buffer_pct.store(read * 100 / data.len().max(1), Ordering::Relaxed);
         },
-        |e| eprintln!("Output error: {}", e),
+        |e| log::log(&format!("output stream error: {}", e)),
         None,
     ) {
         Ok(s) => s,
@@ -947,43 +920,68 @@ fn run_receiver(
     let mut pkt = vec![0u8; PACKET_BYTES];
     let mut expected: Option<u32> = None;
     let mut playing = false;
+    let mut last_mismatch_log = std::time::Instant::now() - Duration::from_secs(10);
 
     while state.running.load(Ordering::Relaxed) {
         match socket.recv_from(&mut pkt) {
             Ok((amt, _)) if amt == PACKET_BYTES => {
-                let seq = LittleEndian::read_u32(&pkt[0..4]);
+                let header = match parse_header(&pkt, sr as u32, ch as u8) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        if last_mismatch_log.elapsed() > Duration::from_secs(5) {
+                            match e {
+                                ParseError::BadMagic => log::log("rx: bad magic / alien packet"),
+                                ParseError::UnsupportedVersion(v) => log::log(&format!("rx: unsupported version {}", v)),
+                                ParseError::SampleRateMismatch { got, expected } => log::log(&format!("rx: sample rate mismatch got={} expected={}", got, expected)),
+                                ParseError::ChannelsMismatch { got, expected } => log::log(&format!("rx: channels mismatch got={} expected={}", got, expected)),
+                            }
+                            last_mismatch_log = std::time::Instant::now();
+                        }
+                        continue;
+                    }
+                };
+                let seq = header.seq;
                 if let Some(exp) = expected {
                     let diff = seq.wrapping_sub(exp);
                     if diff >= u32::MAX / 2 {
-                        // 遅延/重複パケット — 音声データだけ捨てる
                         continue;
                     }
                     if diff > 0 {
-                        // ロス補完: 最大32パケット分の無音を挿入（無限ループ防止）
                         let fill = diff.min(32) as usize * PACKET_SAMPLES * ch;
-                        for _ in 0..fill { let _ = prod.push(0.0); }
+                        let mut dropped = 0u64;
+                        for _ in 0..fill {
+                            if prod.push(0.0).is_err() { dropped += 1; }
+                        }
+                        if dropped > 0 {
+                            state.buf_overflow.fetch_add(dropped, Ordering::Relaxed);
+                        }
                         state.packet_loss.fetch_add(diff as u64, Ordering::Relaxed);
                     }
                 }
                 expected = Some(seq.wrapping_add(1));
+                let mut dropped = 0u64;
                 for i in 0..(PACKET_SAMPLES * ch) {
-                    let _ = prod.push(LittleEndian::read_f32(&pkt[4 + i * 4..4 + (i + 1) * 4]));
+                    let s = LittleEndian::read_f32(&pkt[HEADER_BYTES + i * 4..HEADER_BYTES + (i + 1) * 4]);
+                    if prod.push(s).is_err() { dropped += 1; }
+                }
+                if dropped > 0 {
+                    state.buf_overflow.fetch_add(dropped, Ordering::Relaxed);
                 }
             }
             _ => {}
         }
 
-        // バッファ残量をmsに変換して報告
-        let buf_ms = prod.len() * 1000 / (sr * ch);
+        let buf_ms = prod.len() * 1000 / (sr * ch).max(1);
         state.recv_buffer_ms.store(buf_ms, Ordering::Relaxed);
 
-        // ジッターバッファ分溜まったら再生開始（または再開）
-        let jitter_samples = state.jitter_buffer_ms.load(Ordering::Relaxed) * sr / 1000 * ch;
-        if rebuffering.load(Ordering::Relaxed) && prod.len() >= jitter_samples {
+        // ヒステリシス: 再生開始/再開は target × 1.5 溜まってから
+        let jitter_ms = state.jitter_buffer_ms.load(Ordering::Relaxed);
+        let release_samples = jitter_ms * sr / 1000 * ch * 3 / 2;
+        if rebuffering.load(Ordering::Relaxed) && prod.len() >= release_samples {
             rebuffering.store(false, Ordering::Relaxed);
             if !playing {
                 if let Err(e) = stream.play() {
-                    eprintln!("Output stream start failed: {}", e);
+                    log::log(&format!("Output stream start failed: {}", e));
                     break;
                 }
                 playing = true;

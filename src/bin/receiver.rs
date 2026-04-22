@@ -1,6 +1,5 @@
 // Network Audio Bridge — Receiver v2
 // アダプティブSRCによるクロックドリフト補正
-// 送信機（nab）とのパケット互換維持・送信機コードは一切変更なし
 
 use byteorder::{ByteOrder, LittleEndian};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -22,24 +21,31 @@ use rubato::{
 };
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-// ─── パケット定数（送信機と同一） ──────────────────────────────────
-const PACKET_SAMPLES: usize = 128;
+#[path = "../log.rs"]
+mod log;
+#[path = "../netopts.rs"]
+mod netopts;
+#[path = "../packet.rs"]
+mod packet;
+
+use packet::{packet_bytes, parse_header, HEADER_BYTES, PACKET_SAMPLES, ParseError};
+
 const CH: usize = 2;
-const PACKET_BYTES: usize = 4 + PACKET_SAMPLES * CH * 4;
+const PACKET_BYTES: usize = packet_bytes(CH);
 const DEFAULT_PORT: u16 = 8000;
 
 // ─── SRC設定 ─────────────────────────────────────────────────────
-const SRC_CHUNK: usize = 512;           // 1回のSRC処理フレーム数（チャンネルあたり）
-const P_GAIN_DEFAULT: f64 = 3e-7;       // 比例ゲイン初期値
-const P_GAIN_MIN: f64 = 1e-8;           // 最小ゲイン
-const P_GAIN_MAX: f64 = 1e-5;           // 最大ゲイン
-const MAX_RATIO_DEV: f64 = 0.005;       // 最大レシオ偏差 ±0.5%
+const SRC_CHUNK: usize = 512;
+const P_GAIN_DEFAULT: f64 = 3e-7;
+const P_GAIN_MIN: f64 = 1e-8;
+const P_GAIN_MAX: f64 = 1e-5;
+const MAX_RATIO_DEV: f64 = 0.005;
 
-// 対応サンプルレート（全プロ用レート）
 const SAMPLE_RATES: &[(u32, &str)] = &[
     (44100,  "44.1 kHz"),
     (48000,  "48 kHz   (default)"),
@@ -49,7 +55,6 @@ const SAMPLE_RATES: &[(u32, &str)] = &[
     (192000, "192 kHz"),
 ];
 
-// ─── Wizard設定 ───────────────────────────────────────────────────
 struct RecvConfig {
     sample_rate: u32,
     output_device: Option<String>,
@@ -62,15 +67,15 @@ enum WizardStep {
     EnterPort { buf: String },
 }
 
-// ─── 共有状態 ─────────────────────────────────────────────────────
 struct State {
     raw_ms: AtomicUsize,
     play_ms: AtomicUsize,
     loss: AtomicU64,
+    buf_overflow: AtomicU64,
     ppm: AtomicI64,
     rebuffering: AtomicBool,
     jitter_ms: AtomicUsize,
-    p_gain_bits: AtomicU64,   // f64をビットとして保存（AtomicF64が安定版にないため）
+    p_gain_bits: AtomicU64,
     running: AtomicBool,
 }
 
@@ -80,6 +85,7 @@ impl State {
             raw_ms: AtomicUsize::new(0),
             play_ms: AtomicUsize::new(0),
             loss: AtomicU64::new(0),
+            buf_overflow: AtomicU64::new(0),
             ppm: AtomicI64::new(0),
             rebuffering: AtomicBool::new(true),
             jitter_ms: AtomicUsize::new(300),
@@ -97,12 +103,14 @@ impl State {
     }
 }
 
-// ─── main ─────────────────────────────────────────────────────────
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    log::init("nab-recv");
+
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        log::log(&format!("PANIC: {}", info));
         default_hook(info);
     }));
 
@@ -129,7 +137,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = config.port;
     let sample_rate = config.sample_rate;
 
-    // デバイス取得
     let device = {
         let selected = config.output_device.as_deref().and_then(|name| {
             host.output_devices().ok()?.find(|d| d.name().ok().as_deref() == Some(name))
@@ -148,14 +155,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = Arc::new(State::new());
 
-    // ─── リングバッファ（4秒分）───────────────────────────────────
     let buf_cap = sr * 4 * CH;
     let raw_rb = HeapRb::<f32>::new(buf_cap);
     let play_rb = HeapRb::<f32>::new(buf_cap);
     let (raw_prod, raw_cons) = raw_rb.split();
     let (play_prod, mut play_cons) = play_rb.split();
 
-    // ─── CPAL出力ストリーム ────────────────────────────────────────
     let stream = {
         let state_cb = Arc::clone(&state);
         device.build_output_stream(
@@ -173,40 +178,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let fill_ms = play_cons.len() * 1000 / (sr * CH).max(1);
                 state_cb.play_ms.store(fill_ms, Ordering::Relaxed);
             },
-            |e| eprintln!("出力エラー: {e}"),
+            |e| log::log(&format!("output stream error: {}", e)),
             None,
         )?
     };
     stream.play()?;
 
-    // ─── UDPスレッド ───────────────────────────────────────────────
     let udp_thread = {
         let state_udp = Arc::clone(&state);
         let mut prod = raw_prod;
-        thread::spawn(move || {
-            let socket = UdpSocket::bind(format!("0.0.0.0:{port}"))
-                .expect("UDPバインド失敗");
-            socket.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
+        let handle = thread::spawn(move || {
+            let socket = match UdpSocket::bind(format!("0.0.0.0:{port}")) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("UDPバインド失敗: {}", e)));
+                    return;
+                }
+            };
+            if let Err(e) = netopts::disable_udp_connreset(&socket) {
+                log::log(&format!("disable_udp_connreset (recv) failed: {}", e));
+            }
+            if let Err(e) = socket.set_read_timeout(Some(Duration::from_millis(100))) {
+                let _ = ready_tx.send(Err(format!("読み込みタイムアウト設定失敗: {}", e)));
+                return;
+            }
+            let _ = ready_tx.send(Ok(()));
+
             let mut pkt = vec![0u8; PACKET_BYTES];
             let mut expected: Option<u32> = None;
+            let mut last_mismatch_log = Instant::now() - Duration::from_secs(10);
 
             while state_udp.running.load(Ordering::Relaxed) {
                 match socket.recv_from(&mut pkt) {
                     Ok((amt, _)) if amt == PACKET_BYTES => {
-                        let seq = LittleEndian::read_u32(&pkt[0..4]);
+                        let header = match parse_header(&pkt, sr as u32, CH as u8) {
+                            Ok(h) => h,
+                            Err(e) => {
+                                if last_mismatch_log.elapsed() > Duration::from_secs(5) {
+                                    match e {
+                                        ParseError::BadMagic => log::log("rx: bad magic / alien packet"),
+                                        ParseError::UnsupportedVersion(v) => log::log(&format!("rx: unsupported version {}", v)),
+                                        ParseError::SampleRateMismatch { got, expected } => log::log(&format!("rx: sample rate mismatch got={} expected={}", got, expected)),
+                                        ParseError::ChannelsMismatch { got, expected } => log::log(&format!("rx: channels mismatch got={} expected={}", got, expected)),
+                                    }
+                                    last_mismatch_log = Instant::now();
+                                }
+                                continue;
+                            }
+                        };
+                        let seq = header.seq;
                         if let Some(exp) = expected {
                             let diff = seq.wrapping_sub(exp);
                             if diff >= u32::MAX / 2 { continue; }
                             if diff > 0 {
                                 let fill = diff.min(32) as usize * PACKET_SAMPLES * CH;
-                                for _ in 0..fill { let _ = prod.push(0.0f32); }
+                                let mut dropped = 0u64;
+                                for _ in 0..fill {
+                                    if prod.push(0.0f32).is_err() { dropped += 1; }
+                                }
+                                if dropped > 0 {
+                                    state_udp.buf_overflow.fetch_add(dropped, Ordering::Relaxed);
+                                }
                                 state_udp.loss.fetch_add(diff as u64, Ordering::Relaxed);
                             }
                         }
                         expected = Some(seq.wrapping_add(1));
+                        let mut dropped = 0u64;
                         for i in 0..(PACKET_SAMPLES * CH) {
-                            let s = LittleEndian::read_f32(&pkt[4 + i * 4..4 + (i + 1) * 4]);
-                            let _ = prod.push(s);
+                            let s = LittleEndian::read_f32(&pkt[HEADER_BYTES + i * 4..HEADER_BYTES + (i + 1) * 4]);
+                            if prod.push(s).is_err() { dropped += 1; }
+                        }
+                        if dropped > 0 {
+                            state_udp.buf_overflow.fetch_add(dropped, Ordering::Relaxed);
                         }
                         let ms = prod.len() * 1000 / (sr * CH).max(1);
                         state_udp.raw_ms.store(ms, Ordering::Relaxed);
@@ -214,10 +258,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     _ => {}
                 }
             }
-        })
+        });
+        match ready_rx.recv() {
+            Ok(Ok(())) => handle,
+            Ok(Err(e)) => {
+                let _ = handle.join();
+                let _ = disable_raw_mode();
+                let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+                return Err(e.into());
+            }
+            Err(_) => {
+                let _ = handle.join();
+                let _ = disable_raw_mode();
+                let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+                return Err("UDPスレッド起動失敗".into());
+            }
+        }
     };
 
-    // ─── SRCスレッド（ドリフト補正） ─────────────────────────────
     let src_thread = {
         let state_src = Arc::clone(&state);
         let mut cons = raw_cons;
@@ -231,17 +289,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 oversampling_factor: 64,
                 window: WindowFunction::BlackmanHarris2,
             };
-            let mut resampler = SincFixedIn::<f32>::new(
+            let mut resampler = match SincFixedIn::<f32>::new(
                 1.0,
                 1.0 + MAX_RATIO_DEV + 0.001,
                 params,
                 SRC_CHUNK,
                 CH,
-            ).expect("リサンプラー初期化失敗");
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::log(&format!("リサンプラー初期化失敗: {}", e));
+                    state_src.running.store(false, Ordering::Relaxed);
+                    return;
+                }
+            };
 
             let max_out = (SRC_CHUNK as f64 * (1.0 + MAX_RATIO_DEV) + 16.0) as usize;
             let mut waves_out: Vec<Vec<f32>> = vec![vec![0.0f32; max_out]; CH];
             let mut waves_in: Vec<Vec<f32>> = vec![vec![0.0f32; SRC_CHUNK]; CH];
+            let mut interleaved = vec![0.0f32; SRC_CHUNK * CH];
             let mut ratio_timer = Instant::now();
 
             while state_src.running.load(Ordering::Relaxed) {
@@ -250,8 +316,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                // インターリーブ読み出し → プレーナー変換
-                let mut interleaved = vec![0.0f32; SRC_CHUNK * CH];
                 cons.pop_slice(&mut interleaved);
                 for i in 0..SRC_CHUNK {
                     for c in 0..CH {
@@ -259,31 +323,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                // リサンプリング
                 let n_frames = match resampler.process_into_buffer(&waves_in, &mut waves_out, None) {
                     Ok((_, n)) => n,
-                    Err(e) => { eprintln!("SRCエラー: {e}"); continue; }
+                    Err(e) => {
+                        log::log(&format!("SRC error: {}", e));
+                        continue;
+                    }
                 };
 
-                // プレーナー → インターリーブ → play_bufへ
+                let mut dropped = 0u64;
                 for i in 0..n_frames {
                     for c in 0..CH {
-                        let _ = pprod.push(waves_out[c][i]);
+                        if pprod.push(waves_out[c][i]).is_err() { dropped += 1; }
                     }
+                }
+                if dropped > 0 {
+                    state_src.buf_overflow.fetch_add(dropped, Ordering::Relaxed);
                 }
 
                 let play_ms = pprod.len() * 1000 / (sr * CH).max(1);
                 state_src.play_ms.store(play_ms, Ordering::Relaxed);
 
-                // リバッファリング解除チェック
+                // ヒステリシス: 解除閾値は target × 1.5
                 if state_src.rebuffering.load(Ordering::Relaxed) {
                     let target = state_src.jitter_ms.load(Ordering::Relaxed) * sr * CH / 1000;
-                    if pprod.len() >= target {
+                    let release = target * 3 / 2;
+                    if pprod.len() >= release {
                         state_src.rebuffering.store(false, Ordering::Relaxed);
                     }
                 }
 
-                // ドリフト補正レシオ更新（200ms毎）
                 if ratio_timer.elapsed() >= Duration::from_millis(200) {
                     ratio_timer = Instant::now();
                     let jitter_ms = state_src.jitter_ms.load(Ordering::Relaxed);
@@ -293,7 +362,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let adj = error * state_src.get_p_gain();
                     let ratio = (1.0 + adj).clamp(1.0 - MAX_RATIO_DEV, 1.0 + MAX_RATIO_DEV);
                     if let Err(e) = resampler.set_resample_ratio(ratio, true) {
-                        eprintln!("レシオ更新エラー: {e}");
+                        log::log(&format!("ratio update error: {}", e));
                     }
                     state_src.ppm.store((adj * 1_000_000.0) as i64, Ordering::Relaxed);
                 }
@@ -301,7 +370,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     };
 
-    // ─── TUI（メインループ） ──────────────────────────────────────
     let mut quit_pressed = false;
     let mut quit_timer = Instant::now();
 
@@ -310,6 +378,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let raw_ms  = state.raw_ms.load(Ordering::Relaxed);
         let play_ms = state.play_ms.load(Ordering::Relaxed);
         let loss    = state.loss.load(Ordering::Relaxed);
+        let overflow = state.buf_overflow.load(Ordering::Relaxed);
         let ppm     = state.ppm.load(Ordering::Relaxed);
         let jitter  = state.jitter_ms.load(Ordering::Relaxed);
         let p_gain  = state.get_p_gain();
@@ -328,7 +397,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ])
                 .split(f.area());
 
-            // ステータス
             let (status_text, status_color) = if rebuf {
                 ("BUFFERING...", Color::Yellow)
             } else {
@@ -344,7 +412,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chunks[0],
             );
 
-            // raw buffer
             let raw_pct = (raw_ms * 100 / 4000).min(100) as u16;
             f.render_widget(
                 Gauge::default()
@@ -355,7 +422,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chunks[1],
             );
 
-            // play buffer
             let play_pct = (play_ms * 100 / 4000).min(100) as u16;
             f.render_widget(
                 Gauge::default()
@@ -366,7 +432,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chunks[2],
             );
 
-            // ドリフト補正
             let drift_color = if ppm.abs() < 200 { Color::Green }
                 else if ppm.abs() < 1000 { Color::Yellow }
                 else { Color::Red };
@@ -383,13 +448,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chunks[3],
             );
 
-            // 統計
+            let stats_color = if overflow > 0 { Color::Red } else { Color::Reset };
             f.render_widget(
                 Paragraph::new(format!(
-                    "Packet loss: {}  │  Device: {}  │  q × 2 = quit",
-                    loss, device_name
+                    "Loss: {}  │  Overflow: {}  │  Device: {}  │  q × 2 = quit",
+                    loss, overflow, device_name
                 ))
-                .block(Block::default().borders(Borders::ALL).title(" Stats ")),
+                .block(Block::default().borders(Borders::ALL).title(" Stats "))
+                .style(Style::default().fg(stats_color)),
                 chunks[4],
             );
         })?;
@@ -429,12 +495,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.running.store(false, Ordering::Relaxed);
     let _ = disable_raw_mode();
     let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
-    let _ = udp_thread.join();
-    let _ = src_thread.join();
+    if let Err(e) = udp_thread.join() {
+        log::log(&format!("udp thread panic: {:?}", e));
+    }
+    if let Err(e) = src_thread.join() {
+        log::log(&format!("src thread panic: {:?}", e));
+    }
     Ok(())
 }
 
-// ─── Wizard ───────────────────────────────────────────────────────
 fn run_wizard(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     output_devices: &[String],
