@@ -21,6 +21,7 @@ use std::thread;
 use std::time::Duration;
 
 mod log;
+mod netinfo;
 mod netopts;
 mod packet;
 
@@ -580,6 +581,11 @@ fn run_tui(
     };
     let is_send = matches!(config.mode, RunMode::Send | RunMode::Duplex);
     let is_recv = matches!(config.mode, RunMode::Recv | RunMode::Duplex);
+    let my_ip = if is_recv {
+        netinfo::local_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "?.?.?.?".to_string())
+    } else {
+        String::new()
+    };
     let mut quit_pending = false;
     let mut quit_time = std::time::Instant::now();
 
@@ -614,7 +620,8 @@ fn run_tui(
             let conn = if is_send {
                 format!("→ {}", config.remote_addr)
             } else {
-                format!("← {}", config.listen_addr)
+                let port = config.listen_addr.rsplit(':').next().unwrap_or("8000");
+                format!("← このマシンのアドレス: {}:{}  (送信側で入力)", my_ip, port)
             };
             f.render_widget(
                 Paragraph::new(format!(" {}  {}  ● Running", mode_label, conn))

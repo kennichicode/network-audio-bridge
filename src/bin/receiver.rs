@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 
 #[path = "../log.rs"]
 mod log;
+#[path = "../netinfo.rs"]
+mod netinfo;
 #[path = "../netopts.rs"]
 mod netopts;
 #[path = "../packet.rs"]
@@ -136,6 +138,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sr = config.sample_rate as usize;
     let port = config.port;
     let sample_rate = config.sample_rate;
+    let my_ip = netinfo::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "?.?.?.?".to_string());
 
     let device = {
         let selected = config.output_device.as_deref().and_then(|name| {
@@ -404,10 +409,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             f.render_widget(
                 Paragraph::new(format!(
-                    "Network Audio Bridge — Receiver v2  │  Port: {}  │  {} Hz  │  {}",
-                    port, sample_rate, status_text
+                    "NAB Receiver v2  │  受信アドレス: {}:{}  │  {} Hz  │  {}",
+                    my_ip, port, sample_rate, status_text
                 ))
-                .block(Block::default().borders(Borders::ALL).title(" Status "))
+                .block(Block::default().borders(Borders::ALL).title(" Status  (送信側でこのアドレスを入力) "))
                 .style(Style::default().fg(status_color)),
                 chunks[0],
             );
@@ -643,22 +648,27 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
             );
         }
         WizardStep::EnterPort { buf } => {
+            let my_ip = netinfo::local_ip()
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "?.?.?.?".to_string());
             f.render_widget(
                 Paragraph::new(format!(
-                    "Listen port  (Enter で {} を使用)",
-                    DEFAULT_PORT
+                    "待ち受けるポート番号（IPアドレスではありません）\n\
+                     送信側には「{}:{}」を入力してもらう想定です。\n\
+                     番号を変える必要がなければ Enter だけでOK（既定 {}）。",
+                    my_ip, DEFAULT_PORT, DEFAULT_PORT
                 ))
                 .style(Style::default().fg(Color::Yellow)),
                 layout[0],
             );
             f.render_widget(
-                Paragraph::new(format!("  {}█", buf))
+                Paragraph::new(format!("  Port: {}█", buf))
                     .block(Block::default().borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::Cyan))),
                 layout[1],
             );
             f.render_widget(
-                Paragraph::new("Enter Confirm (空白でデフォルト8000)   Esc Quit")
+                Paragraph::new("Enter で決定（空欄なら 8000）   Esc で中止")
                     .style(Style::default().fg(Color::DarkGray)),
                 layout[2],
             );
