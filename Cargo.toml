@@ -19,11 +19,18 @@ ratatui = "0.29"
 crossterm = "0.28"
 rubato = "0.16"
 if-addrs = "0.13"
+livekit = { version = "0.7.45", features = ["rustls-tls-native-roots"] }
+livekit-api = { version = "0.5.1", features = ["rustls-tls-native-roots"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 
 
 [[bin]]
 name = "nab-recv"
 path = "src/bin/receiver.rs"
+
+[[bin]]
+name = "nab-live"
+path = "src/bin/nab_live.rs"
 
 [profile.release]
 opt-level = 3
