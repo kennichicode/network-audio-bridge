@@ -32,11 +32,13 @@ void NabTapAudioProcessorEditor::paint(juce::Graphics& g)
     const auto socketReady = processor.getSocketReady();
 
     const auto statusColour = packetsMoving ? juce::Colour(0xff91ffb8)
-                                            : (audioMoving ? juce::Colour(0xffffd166)
+                                            : (socketReady ? juce::Colour(0xffffd166)
                                                            : juce::Colour(0xffff6b6b));
-    const auto statusText = packetsMoving ? "CONNECTED - audio is reaching nab-live"
-                                          : (audioMoving ? "WAITING - start nab-live sender"
-                                                         : "NO AUDIO CALLBACKS YET");
+    const auto statusText = packetsMoving
+        ? (audioMoving ? "CONNECTED - audio is reaching nab-live"
+                       : "CONNECTED - silent standby")
+        : (socketReady ? "READY - waiting for first packet"
+                       : "WAITING - open NAB Live Sender.command");
 
     auto statusArea = area.removeFromTop(46);
     g.setColour(statusColour.withAlpha(0.18f));

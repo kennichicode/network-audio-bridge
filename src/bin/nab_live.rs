@@ -580,6 +580,10 @@ fn handle_room_event(event: RoomEvent, state: &State) -> bool {
             ));
             connection_state == ConnectionState::Disconnected
         }
+        RoomEvent::TokenRefreshed { .. } => {
+            log::log("LiveKit token refreshed");
+            false
+        }
         other => {
             log::log(&format!("LiveKit event: {other:?}"));
             false

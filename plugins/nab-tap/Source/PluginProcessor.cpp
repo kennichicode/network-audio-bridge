@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -179,6 +180,7 @@ void NabTapBridge::run()
     std::vector<float> audio(kFramesPerPacket * kTapChannels, 0.0f);
     std::vector<char> packet(sizeof(TapPacketHeader) + audio.size() * sizeof(float), 0);
     bool receiverWasMissing = true;
+    double nextSilencePacketMs = 0.0;
 
     while (! threadShouldExit())
     {
@@ -200,17 +202,32 @@ void NabTapBridge::run()
             continue;
         }
 
-        if (availableSamples() < audio.size())
-        {
-            wait(2);
-            continue;
-        }
+        const auto sampleRate = sampleRateHz.load(std::memory_order_relaxed);
+        const auto packetIntervalMs =
+            (1000.0 * static_cast<double>(kFramesPerPacket))
+            / static_cast<double>(std::max<uint32_t>(1, sampleRate));
+        const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+        const auto haveSamples = availableSamples();
 
-        const auto samples = popSamples(audio.data(), audio.size());
-        if (samples != audio.size())
+        size_t samples = 0;
+        if (haveSamples >= audio.size())
         {
-            wait(2);
-            continue;
+            samples = popSamples(audio.data(), audio.size());
+            nextSilencePacketMs = nowMs + packetIntervalMs;
+        }
+        else
+        {
+            if (nowMs < nextSilencePacketMs)
+            {
+                const auto waitMs =
+                    static_cast<int>(std::max(1.0, std::ceil(nextSilencePacketMs - nowMs)));
+                wait(waitMs);
+                continue;
+            }
+
+            std::fill(audio.begin(), audio.end(), 0.0f);
+            samples = audio.size();
+            nextSilencePacketMs = nowMs + packetIntervalMs;
         }
 
         const auto frames = static_cast<uint16_t>(samples / kTapChannels);
