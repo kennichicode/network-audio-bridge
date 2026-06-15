@@ -949,6 +949,7 @@ fn start_plugin_capture(
         "Waiting for NAB Tap plugin at {} ...",
         socket_path.display()
     );
+    let mut last_wait_notice = Instant::now();
 
     let mut buf = vec![0u8; TAP_MAX_PACKET_BYTES];
     let (first_packet_bytes, first_packet) = loop {
@@ -967,6 +968,12 @@ fn start_plugin_capture(
                 if err.kind() == io::ErrorKind::WouldBlock
                     || err.kind() == io::ErrorKind::TimedOut =>
             {
+                if last_wait_notice.elapsed() >= Duration::from_secs(5) {
+                    eprintln!(
+                        "Still waiting for NAB Tap audio. Start REAPER playback/monitoring and make sure NAB Tap is inserted on Master FX or Monitor FX."
+                    );
+                    last_wait_notice = Instant::now();
+                }
                 continue;
             }
             Err(err) => return Err(err.into()),

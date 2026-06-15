@@ -11,6 +11,7 @@ fi
 
 mkdir -p "$HOME/Library/Audio/Plug-Ins/VST3"
 
+rm -rf "$HOME/Library/Audio/Plug-Ins/VST3/NAB Tap.vst3"
 ditto "$VST3_SRC" "$HOME/Library/Audio/Plug-Ins/VST3/NAB Tap.vst3"
 
 codesign --force --deep -s - "$HOME/Library/Audio/Plug-Ins/VST3/NAB Tap.vst3" >/dev/null

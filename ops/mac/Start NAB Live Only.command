@@ -46,7 +46,7 @@ fi
 if [[ ! -d "$PLUGIN" ]]; then
   echo "Warning: NAB Tap VST3 is not installed at:"
   echo "  $PLUGIN"
-  echo "Run Install NAB Tap Plugin.command first."
+  echo "Run NAB Tap Installer.command first."
   echo ""
 fi
 

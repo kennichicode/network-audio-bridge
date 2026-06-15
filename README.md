@@ -152,7 +152,7 @@ REAPER Master -> NAB Tap plugin -> ~/Library/Caches/KenichiNAB/nab-tap.sock -> n
 - Opus変換、SRC、LiveKit送信、再接続、表示は `nab-live` 側で行います。
 - 96kHzのREAPERセッションも想定し、`nab-live` 内で48kHz stereoへ変換します。
 - LiveKit Rust SDKで公開されている音声保護設定として、bitrate / RED / DTX / queueをCLIから設定できます。Opus FECそのものは現SDKの公開オプションではありません。
-- 通常は `Start NAB Live Only.command` を使います。設定を選びたい時だけ `Start NAB Live Wizard.command` を使います。
+- 通常はデスクトップの `NAB Live Sender.command` を使います。設定を選びたい時だけ `NAB Live Wizard.command` を使います。
 
 起動:
 
@@ -183,9 +183,9 @@ nab-live --source plugin --enable-dtx
 
 Mac miniでの通常手順:
 
-1. `Install NAB Tap Plugin.command` を一度実行する。
+1. `NAB Tap Installer.command` を一度実行する。
 2. REAPERを起動し、Master FXまたはMonitor FXに `VST3: NAB Tap (Kenichi Kawabata)` を挿す。
-3. `Start NAB Live Only.command` を開いたままにする。
+3. `NAB Live Sender.command` を開いたままにする。
 4. ブラウザで `https://livekit.kenichi-kawabata.com/` を開く。
 
 プラグインのビルド:

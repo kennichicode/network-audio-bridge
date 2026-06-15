@@ -65,7 +65,7 @@ void NabTapAudioProcessorEditor::paint(juce::Graphics& g)
                      juce::Justification::left,
                      1);
     g.drawFittedText("Socket: " + juce::String(socketReady ? "ready" : "not ready") +
-                         "   Open Start NAB Live Only.command to create the receiver.",
+                         "   Open NAB Live Sender.command to create the receiver.",
                      area.removeFromTop(22),
                      juce::Justification::left,
                      1);
