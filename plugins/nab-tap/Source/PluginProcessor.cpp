@@ -117,7 +117,10 @@ void NabTapBridge::prepare(double sampleRate, int maxBlockSize)
     readIndex.store(0, std::memory_order_relaxed);
     writeIndex.store(0, std::memory_order_relaxed);
     droppedFrames.store(0, std::memory_order_relaxed);
+    audioCallbacks.store(0, std::memory_order_relaxed);
+    framesSeen.store(0, std::memory_order_relaxed);
     sequence.store(0, std::memory_order_relaxed);
+    socketReady.store(false, std::memory_order_relaxed);
     std::atomic_store_explicit(&ringState, nextState, std::memory_order_release);
 
     startThread(juce::Thread::Priority::background);
@@ -127,6 +130,7 @@ void NabTapBridge::release()
 {
     std::shared_ptr<NabTapRingState> empty;
     std::atomic_store_explicit(&ringState, empty, std::memory_order_release);
+    socketReady.store(false, std::memory_order_relaxed);
     signalThreadShouldExit();
     stopThread(1000);
     resetSocket();
@@ -140,6 +144,8 @@ void NabTapBridge::pushAudio(const juce::AudioBuffer<float>& buffer) noexcept
 
     const auto numFrames = buffer.getNumSamples();
     const auto numChannels = buffer.getNumChannels();
+    audioCallbacks.fetch_add(1, std::memory_order_relaxed);
+    framesSeen.fetch_add(static_cast<uint64_t>(std::max(0, numFrames)), std::memory_order_relaxed);
     const float* left = numChannels > 0 ? buffer.getReadPointer(0) : nullptr;
     const float* right = numChannels > 1 ? buffer.getReadPointer(1) : left;
 
@@ -176,7 +182,9 @@ void NabTapBridge::run()
 
     while (! threadShouldExit())
     {
-        if (! destinationReady() || ! ensureSocket())
+        const auto ready = destinationReady();
+        socketReady.store(ready, std::memory_order_relaxed);
+        if (! ready || ! ensureSocket())
         {
             dropBufferedSamples();
             receiverWasMissing = true;
@@ -232,12 +240,14 @@ void NabTapBridge::run()
         if (sent == static_cast<ssize_t>(bytes))
         {
             packetsSent.fetch_add(1, std::memory_order_relaxed);
+            socketReady.store(true, std::memory_order_relaxed);
         }
         else
         {
             socketErrors.fetch_add(1, std::memory_order_relaxed);
             if (errno == ENOENT || errno == ECONNREFUSED || errno == EBADF)
                 resetSocket();
+            socketReady.store(false, std::memory_order_relaxed);
             receiverWasMissing = true;
             wait(5);
         }
