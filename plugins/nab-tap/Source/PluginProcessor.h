@@ -3,7 +3,19 @@
 #include <JuceHeader.h>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <vector>
+
+struct NabTapRingState
+{
+    explicit NabTapRingState(size_t capacity)
+        : ring(capacity, 0.0f), mask(capacity - 1)
+    {
+    }
+
+    std::vector<float> ring;
+    size_t mask = 0;
+};
 
 class NabTapBridge final : private juce::Thread
 {
@@ -24,10 +36,12 @@ private:
     void run() override;
     void resetSocket();
     bool ensureSocket();
+    bool destinationReady() const noexcept;
+    void dropBufferedSamples() noexcept;
+    size_t availableSamples() const noexcept;
     size_t popSamples(float* dest, size_t maxSamples) noexcept;
 
-    std::vector<float> ring;
-    size_t ringMask = 0;
+    std::shared_ptr<NabTapRingState> ringState;
     std::atomic<uint64_t> readIndex { 0 };
     std::atomic<uint64_t> writeIndex { 0 };
     std::atomic<uint64_t> droppedFrames { 0 };

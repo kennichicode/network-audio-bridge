@@ -4,6 +4,12 @@ set -euo pipefail
 BIN="$HOME/NetworkAudioBridge/nab-live"
 ENV_FILE="$HOME/.config/kenichi-vps/livekit.env"
 PLUGIN="$HOME/Library/Audio/Plug-Ins/VST3/NAB Tap.vst3"
+SOCKET="$HOME/Library/Caches/KenichiNAB/nab-tap.sock"
+PROFILE="${NAB_LIVE_PROFILE:-concert}"
+BITRATE="${NAB_LIVE_BITRATE:-}"
+LIVEKIT_BUFFER_MS="${NAB_LIVE_BUFFER_MS:-}"
+RED_DISABLED="${NAB_LIVE_DISABLE_RED:-}"
+DTX_ENABLED="${NAB_LIVE_ENABLE_DTX:-}"
 
 clear
 echo "NAB Live Sender"
@@ -17,6 +23,12 @@ echo "  1. Keep this window open."
 echo "  2. In REAPER, insert: VST3: NAB Tap (Kenichi Kawabata)"
 echo "     on Master FX or Monitor FX."
 echo "  3. Listen at: https://livekit.kenichi-kawabata.com/"
+echo ""
+echo "Settings:"
+echo "  profile: $PROFILE"
+echo "  socket : $SOCKET"
+echo "  bitrate override: ${BITRATE:-profile default}"
+echo "  LiveKit buffer : ${LIVEKIT_BUFFER_MS:-profile default}"
 echo ""
 
 if [[ ! -x "$BIN" ]]; then
@@ -38,13 +50,32 @@ if [[ ! -d "$PLUGIN" ]]; then
   echo ""
 fi
 
-"$BIN" \
+args=(
   --source plugin \
+  --plugin-socket "$SOCKET" \
   --env-file "$ENV_FILE" \
   --room "reaper-master" \
   --identity "nab-live-mac-mini" \
-  --bitrate 256000 \
-  --livekit-buffer-ms 1000
+  --profile "$PROFILE"
+)
+
+if [[ -n "$BITRATE" ]]; then
+  args+=(--bitrate "$BITRATE")
+fi
+
+if [[ -n "$LIVEKIT_BUFFER_MS" ]]; then
+  args+=(--livekit-buffer-ms "$LIVEKIT_BUFFER_MS")
+fi
+
+if [[ -n "$RED_DISABLED" ]]; then
+  args+=(--disable-red)
+fi
+
+if [[ -n "$DTX_ENABLED" ]]; then
+  args+=(--enable-dtx)
+fi
+
+"$BIN" "${args[@]}"
 
 status=$?
 echo ""

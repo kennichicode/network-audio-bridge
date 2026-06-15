@@ -5,7 +5,8 @@ NAB Tap is a minimal REAPER master-bus VST3 tap for `nab-live`.
 It is a pass-through JUCE audio plugin. The plugin does not encode Opus, connect to
 LiveKit, or perform network reconnect logic. In the audio callback it only copies
 stereo samples into a preallocated local ring buffer. A background thread forwards
-small PCM packets to `nab-live` over `/tmp/nab-tap.sock`.
+small PCM packets to `nab-live` over
+`~/Library/Caches/KenichiNAB/nab-tap.sock`.
 
 Run `nab-live --source plugin` first, then insert `NAB Tap` on REAPER Master FX or
 Monitor FX.

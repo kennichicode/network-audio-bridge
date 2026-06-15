@@ -30,7 +30,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 #[path = "../log.rs"]
 mod log;
@@ -44,7 +47,16 @@ const TAP_MAGIC: &[u8; 8] = b"NABTAP1\0";
 const TAP_VERSION: u32 = 1;
 const TAP_HEADER_BYTES: usize = 40;
 const TAP_MAX_PACKET_BYTES: usize = 64 * 1024;
-const DEFAULT_TAP_SOCKET: &str = "/tmp/nab-tap.sock";
+const DEFAULT_TAP_SOCKET: &str = "~/Library/Caches/KenichiNAB/nab-tap.sock";
+const MIN_BITRATE: u64 = 16_000;
+const MAX_BITRATE: u64 = 510_000;
+const MIN_LIVEKIT_BUFFER_MS: u32 = 20;
+const MAX_LIVEKIT_BUFFER_MS: u32 = 5_000;
+const MAX_RING_BUFFER_SECONDS: usize = 30;
+const CONNECTION_CONNECTING: usize = 0;
+const CONNECTION_CONNECTED: usize = 1;
+const CONNECTION_RECONNECTING: usize = 2;
+const CONNECTION_DISCONNECTED: usize = 3;
 
 type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -52,6 +64,18 @@ type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 enum SourceArg {
     Plugin,
     Coreaudio,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum AudioProfileArg {
+    /// High-quality music monitoring. Default for REAPER master.
+    Concert,
+    /// Slightly lower bitrate while keeping music-safe defaults.
+    Balanced,
+    /// Speech-oriented, lower bitrate, enables DTX unless overridden.
+    Speech,
+    /// Lowest bandwidth profile for difficult networks.
+    LowBandwidth,
 }
 
 #[derive(Parser, Debug)]
@@ -118,13 +142,33 @@ struct Args {
     #[arg(long, default_value = "~/.config/kenichi-vps/livekit.env")]
     env_file: String,
 
-    /// Audio bitrate requested for the published track.
-    #[arg(long, default_value_t = 256_000)]
-    bitrate: u64,
+    /// Audio profile. Use concert for music unless the network is constrained.
+    #[arg(long, value_enum, default_value_t = AudioProfileArg::Concert)]
+    profile: AudioProfileArg,
+
+    /// Audio bitrate requested for the published track. Overrides --profile.
+    #[arg(long)]
+    bitrate: Option<u64>,
+
+    /// Disable LiveKit/WebRTC RED redundant audio payloads.
+    #[arg(long)]
+    disable_red: bool,
+
+    /// Enable DTX. Useful for speech; normally keep disabled for music.
+    #[arg(long, conflicts_with = "disable_dtx")]
+    enable_dtx: bool,
+
+    /// Disable DTX, even when the selected profile would enable it.
+    #[arg(long)]
+    disable_dtx: bool,
 
     /// LiveKit native source queue in milliseconds.
-    #[arg(long, default_value_t = 1000)]
-    livekit_buffer_ms: u32,
+    #[arg(long)]
+    livekit_buffer_ms: Option<u32>,
+
+    /// Disable automatic reconnect on LiveKit/session errors.
+    #[arg(long)]
+    no_reconnect: bool,
 
     /// Local capture ring buffer in seconds.
     #[arg(long, default_value_t = 4)]
@@ -151,6 +195,40 @@ struct RuntimeInfo {
     room: String,
     identity: String,
     input_rate: u32,
+    audio_profile: AudioProfileArg,
+    bitrate: u64,
+    red: bool,
+    dtx: bool,
+    livekit_buffer_ms: u32,
+}
+
+#[derive(Clone, Debug)]
+struct AudioSendConfig {
+    profile: AudioProfileArg,
+    bitrate: u64,
+    red: bool,
+    dtx: bool,
+    livekit_buffer_ms: u32,
+}
+
+#[derive(Clone, Debug)]
+struct CoreAudioCaptureOptions {
+    input: Option<String>,
+    input_sample_rate: u32,
+    input_channels: u16,
+    left_channel: usize,
+    right_channel: usize,
+}
+
+#[derive(Clone, Debug)]
+struct LiveKitConfig {
+    url: String,
+    api_key: String,
+    api_secret: String,
+    room: String,
+    identity: String,
+    audio: AudioSendConfig,
+    reconnect: bool,
 }
 
 #[derive(Default)]
@@ -160,6 +238,9 @@ struct State {
     overflow_frames: AtomicU64,
     underruns: AtomicU64,
     capture_errors: AtomicU64,
+    livekit_errors: AtomicU64,
+    reconnects: AtomicU64,
+    connection_state: AtomicUsize,
     ring_buffer_ms: AtomicUsize,
     peak_l_milli: AtomicUsize,
     peak_r_milli: AtomicUsize,
@@ -235,6 +316,8 @@ async fn main() -> AppResult<()> {
         return Ok(());
     }
 
+    validate_buffer_seconds(args.ring_buffer_seconds)?;
+    let audio_config = resolve_audio_send_config(&args)?;
     let capture_config = if should_show_wizard(&args) {
         match run_wizard(&host)? {
             Some(config) => config,
@@ -262,6 +345,16 @@ async fn main() -> AppResult<()> {
         .or_else(|| read_key(&env, &["LIVEKIT_SECRET", "LIVEKIT_API_SECRET"]))
         .ok_or_else(|| io_error("LIVEKIT_SECRET/LIVEKIT_API_SECRET is missing"))?;
 
+    let livekit_config = LiveKitConfig {
+        url: livekit_url.clone(),
+        api_key,
+        api_secret,
+        room: args.room.clone(),
+        identity: args.identity.clone(),
+        audio: audio_config.clone(),
+        reconnect: !args.no_reconnect,
+    };
+
     let state = Arc::new(State::default());
     let mut capture = start_capture(
         &host,
@@ -277,31 +370,124 @@ async fn main() -> AppResult<()> {
         livekit_url, args.room, args.identity
     );
 
-    let token = AccessToken::with_api_key(&api_key, &api_secret)
-        .with_identity(&args.identity)
-        .with_name(&args.identity)
+    let mut pump = AudioPump::new(capture.input_rate)?;
+    wait_for_initial_buffer(&mut capture.cons, capture.input_rate).await;
+
+    let runtime = RuntimeInfo {
+        source_label: capture.source_label.clone(),
+        livekit_url: livekit_url.clone(),
+        room: args.room.clone(),
+        identity: args.identity.clone(),
+        input_rate: capture.input_rate,
+        audio_profile: audio_config.profile,
+        bitrate: audio_config.bitrate,
+        red: audio_config.red,
+        dtx: audio_config.dtx,
+        livekit_buffer_ms: audio_config.livekit_buffer_ms,
+    };
+
+    let use_tui = !args.no_tui && io::stdout().is_terminal();
+    let loop_result = run_livekit_supervisor(
+        &livekit_config,
+        &runtime,
+        &mut pump,
+        &mut capture.cons,
+        &state,
+        use_tui,
+    )
+    .await;
+
+    drop(capture);
+    loop_result
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum LoopExit {
+    UserQuit,
+    Reconnect,
+}
+
+async fn run_livekit_supervisor(
+    config: &LiveKitConfig,
+    runtime: &RuntimeInfo,
+    pump: &mut AudioPump,
+    cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
+    state: &Arc<State>,
+    use_tui: bool,
+) -> AppResult<()> {
+    let mut attempt: u32 = 0;
+
+    loop {
+        state
+            .connection_state
+            .store(CONNECTION_CONNECTING, Ordering::Relaxed);
+        match run_livekit_session(config, runtime, pump, cons, state, use_tui).await {
+            Ok(LoopExit::UserQuit) => return Ok(()),
+            Ok(LoopExit::Reconnect) if config.reconnect => {
+                attempt = 0;
+                state.reconnects.fetch_add(1, Ordering::Relaxed);
+                attempt = attempt.saturating_add(1);
+                let delay = reconnect_delay(attempt);
+                eprintln!(
+                    "LiveKit disconnected. Reconnecting in {}s...",
+                    delay.as_secs()
+                );
+                if !wait_before_reconnect(delay).await {
+                    return Ok(());
+                }
+            }
+            Ok(LoopExit::Reconnect) => {
+                return Err(io_error("LiveKit disconnected and --no-reconnect is set").into());
+            }
+            Err(err) if config.reconnect => {
+                state.livekit_errors.fetch_add(1, Ordering::Relaxed);
+                state
+                    .connection_state
+                    .store(CONNECTION_DISCONNECTED, Ordering::Relaxed);
+                attempt = attempt.saturating_add(1);
+                let delay = reconnect_delay(attempt);
+                eprintln!(
+                    "LiveKit error: {err}. Reconnecting in {}s...",
+                    delay.as_secs()
+                );
+                if !wait_before_reconnect(delay).await {
+                    return Ok(());
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+async fn run_livekit_session(
+    config: &LiveKitConfig,
+    runtime: &RuntimeInfo,
+    pump: &mut AudioPump,
+    cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
+    state: &Arc<State>,
+    use_tui: bool,
+) -> AppResult<LoopExit> {
+    let token = AccessToken::with_api_key(&config.api_key, &config.api_secret)
+        .with_identity(&config.identity)
+        .with_name(&config.identity)
         .with_grants(VideoGrants {
             room_join: true,
-            room: args.room.clone(),
+            room: config.room.clone(),
             can_publish: true,
-            can_subscribe: true,
+            can_subscribe: false,
             ..Default::default()
         })
         .to_jwt()?;
 
-    let (room, mut events) = Room::connect(&livekit_url, &token, RoomOptions::default()).await?;
-    let event_identity = args.identity.clone();
-    tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            log::log(&format!("{event_identity}: LiveKit event: {event:?}"));
-        }
-    });
+    let mut room_options = RoomOptions::default();
+    room_options.auto_subscribe = false;
+    let (room, mut events) = Room::connect(&config.url, &token, room_options).await?;
 
     let native_source = NativeAudioSource::new(
         AudioSourceOptions::default(),
         OUT_RATE,
         OUT_CHANNELS as u32,
-        args.livekit_buffer_ms,
+        config.audio.livekit_buffer_ms,
     );
     let track = LocalAudioTrack::create_audio_track(
         "reaper-master",
@@ -313,60 +499,146 @@ async fn main() -> AppResult<()> {
             LocalTrack::Audio(track),
             TrackPublishOptions {
                 audio_encoding: Some(AudioEncoding {
-                    max_bitrate: args.bitrate,
+                    max_bitrate: config.audio.bitrate,
                 }),
-                dtx: false,
-                red: true,
+                dtx: config.audio.dtx,
+                red: config.audio.red,
                 source: TrackSource::Microphone,
                 ..Default::default()
             },
         )
         .await?;
+    let publication_sid = publication.sid().clone();
+    state
+        .connection_state
+        .store(CONNECTION_CONNECTED, Ordering::Relaxed);
     eprintln!("Published track SID: {}", publication.sid());
 
-    let mut pump = AudioPump::new(capture.input_rate)?;
-    wait_for_initial_buffer(&mut capture.cons, capture.input_rate).await;
-
-    let runtime = RuntimeInfo {
-        source_label: capture.source_label.clone(),
-        livekit_url: livekit_url.clone(),
-        room: args.room.clone(),
-        identity: args.identity.clone(),
-        input_rate: capture.input_rate,
-    };
-
-    let use_tui = !args.no_tui && io::stdout().is_terminal();
     let loop_result = if use_tui {
-        run_status_tui(
-            &runtime,
-            &mut pump,
-            &mut capture.cons,
-            &native_source,
-            &state,
-        )
-        .await
+        run_status_tui(runtime, pump, cons, &native_source, state, &mut events).await
     } else {
-        run_plain_loop(
-            &runtime,
-            &mut pump,
-            &mut capture.cons,
-            &native_source,
-            &state,
-        )
-        .await
+        run_plain_loop(runtime, pump, cons, &native_source, state, &mut events).await
     };
 
     let _ = room
         .local_participant()
-        .unpublish_track(&publication.sid())
+        .unpublish_track(&publication_sid)
         .await;
     let _ = room.close().await;
-    drop(capture);
     loop_result
+}
+
+fn reconnect_delay(attempt: u32) -> Duration {
+    Duration::from_secs(match attempt {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 4,
+        4 => 8,
+        _ => 15,
+    })
+}
+
+async fn wait_before_reconnect(delay: Duration) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => true,
+        _ = tokio::signal::ctrl_c() => false,
+    }
+}
+
+fn handle_room_event(event: RoomEvent, state: &State) -> bool {
+    match event {
+        RoomEvent::Disconnected { reason } => {
+            state
+                .connection_state
+                .store(CONNECTION_DISCONNECTED, Ordering::Relaxed);
+            log::log(&format!("LiveKit disconnected: {reason:?}"));
+            true
+        }
+        RoomEvent::Reconnecting => {
+            state
+                .connection_state
+                .store(CONNECTION_RECONNECTING, Ordering::Relaxed);
+            log::log("LiveKit reconnecting");
+            false
+        }
+        RoomEvent::Reconnected | RoomEvent::Connected { .. } => {
+            state
+                .connection_state
+                .store(CONNECTION_CONNECTED, Ordering::Relaxed);
+            log::log("LiveKit connected");
+            false
+        }
+        RoomEvent::ConnectionStateChanged(connection_state) => {
+            let value = match connection_state {
+                ConnectionState::Disconnected => CONNECTION_DISCONNECTED,
+                ConnectionState::Connected => CONNECTION_CONNECTED,
+                ConnectionState::Reconnecting => CONNECTION_RECONNECTING,
+            };
+            state.connection_state.store(value, Ordering::Relaxed);
+            log::log(&format!(
+                "LiveKit connection state changed: {connection_state:?}"
+            ));
+            connection_state == ConnectionState::Disconnected
+        }
+        other => {
+            log::log(&format!("LiveKit event: {other:?}"));
+            false
+        }
+    }
 }
 
 fn should_show_wizard(args: &Args) -> bool {
     args.source.is_none() && args.input.is_none()
+}
+
+fn resolve_audio_send_config(args: &Args) -> AppResult<AudioSendConfig> {
+    let (default_bitrate, default_red, default_dtx, default_buffer_ms) =
+        profile_defaults(args.profile);
+    let bitrate = args.bitrate.unwrap_or(default_bitrate);
+    if !(MIN_BITRATE..=MAX_BITRATE).contains(&bitrate) {
+        return Err(io_error(format!("bitrate must be {MIN_BITRATE}..={MAX_BITRATE} bps")).into());
+    }
+
+    let livekit_buffer_ms = args.livekit_buffer_ms.unwrap_or(default_buffer_ms);
+    if !(MIN_LIVEKIT_BUFFER_MS..=MAX_LIVEKIT_BUFFER_MS).contains(&livekit_buffer_ms) {
+        return Err(io_error(format!(
+            "livekit-buffer-ms must be {MIN_LIVEKIT_BUFFER_MS}..={MAX_LIVEKIT_BUFFER_MS}"
+        ))
+        .into());
+    }
+
+    let dtx = if args.disable_dtx {
+        false
+    } else {
+        default_dtx || args.enable_dtx
+    };
+
+    Ok(AudioSendConfig {
+        profile: args.profile,
+        bitrate,
+        red: default_red && !args.disable_red,
+        dtx,
+        livekit_buffer_ms,
+    })
+}
+
+fn profile_defaults(profile: AudioProfileArg) -> (u64, bool, bool, u32) {
+    match profile {
+        AudioProfileArg::Concert => (256_000, true, false, 1_000),
+        AudioProfileArg::Balanced => (160_000, true, false, 1_200),
+        AudioProfileArg::Speech => (64_000, true, true, 800),
+        AudioProfileArg::LowBandwidth => (96_000, true, false, 1_500),
+    }
+}
+
+fn validate_buffer_seconds(seconds: usize) -> AppResult<()> {
+    if seconds == 0 || seconds > MAX_RING_BUFFER_SECONDS {
+        return Err(io_error(format!(
+            "ring-buffer-seconds must be 1..={MAX_RING_BUFFER_SECONDS}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn capture_config_from_args(args: &Args) -> AppResult<CaptureConfig> {
@@ -650,11 +922,13 @@ fn start_capture(
             right_channel,
         } => start_coreaudio_capture(
             host,
-            input.as_deref(),
-            input_sample_rate,
-            input_channels,
-            left_channel,
-            right_channel,
+            CoreAudioCaptureOptions {
+                input,
+                input_sample_rate,
+                input_channels,
+                left_channel,
+                right_channel,
+            },
             state,
             ring_buffer_seconds,
         ),
@@ -667,10 +941,7 @@ fn start_plugin_capture(
     state: Arc<State>,
     ring_buffer_seconds: usize,
 ) -> AppResult<CaptureSetup> {
-    let socket_path = expand_tilde(socket_path);
-    if socket_path.exists() {
-        fs::remove_file(&socket_path)?;
-    }
+    let socket_path = prepare_tap_socket_path(socket_path)?;
     let socket = UnixDatagram::bind(&socket_path)?;
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
 
@@ -707,7 +978,8 @@ fn start_plugin_capture(
         input_rate.max(OUT_RATE) as usize * OUT_CHANNELS * ring_buffer_seconds.max(1);
     let rb = HeapRb::<f32>::new(ring_capacity);
     let (mut prod, cons) = rb.split();
-    push_tap_packet(&first_packet, &mut prod, &state);
+    let mut scratch = vec![0.0f32; TAP_MAX_PACKET_BYTES / std::mem::size_of::<f32>()];
+    push_tap_packet(&first_packet, &mut prod, &state, &mut scratch);
 
     let running = Arc::new(AtomicBool::new(true));
     let running_thread = Arc::clone(&running);
@@ -716,15 +988,24 @@ fn start_plugin_capture(
         let mut expected_seq = first_packet.seq.wrapping_add(1);
         drop(first_packet_bytes);
         let mut recv_buf = vec![0u8; TAP_MAX_PACKET_BYTES];
+        let mut scratch = scratch;
         while running_thread.load(Ordering::Relaxed) {
             match socket.recv(&mut recv_buf) {
                 Ok(amt) => match parse_tap_packet(&recv_buf[..amt]) {
                     Ok(packet) => {
+                        if packet.sample_rate != input_rate {
+                            state_thread.capture_errors.fetch_add(1, Ordering::Relaxed);
+                            log::log(&format!(
+                                "tap packet ignored: sample rate changed from {input_rate} to {}",
+                                packet.sample_rate
+                            ));
+                            continue;
+                        }
                         if packet.seq != expected_seq {
                             state_thread.tap_seq_gaps.fetch_add(1, Ordering::Relaxed);
                         }
                         expected_seq = packet.seq.wrapping_add(1);
-                        push_tap_packet(&packet, &mut prod, &state_thread);
+                        push_tap_packet(&packet, &mut prod, &state_thread, &mut scratch);
                     }
                     Err(err) => {
                         state_thread.capture_errors.fetch_add(1, Ordering::Relaxed);
@@ -767,18 +1048,48 @@ fn start_plugin_capture(
     Err(io_error("NAB Tap plugin IPC is only supported on macOS/Linux").into())
 }
 
+#[cfg(unix)]
+fn prepare_tap_socket_path(socket_path: &str) -> AppResult<PathBuf> {
+    let socket_path = expand_tilde(socket_path);
+    let parent = socket_path
+        .parent()
+        .ok_or_else(|| io_error("plugin socket path must include a parent directory"))?;
+    fs::create_dir_all(parent)?;
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+
+    match fs::symlink_metadata(&socket_path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            fs::remove_file(&socket_path)?;
+        }
+        Ok(_) => {
+            return Err(io_error(format!(
+                "refusing to replace non-socket file at {}",
+                socket_path.display()
+            ))
+            .into());
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    Ok(socket_path)
+}
+
 fn start_coreaudio_capture(
     host: &cpal::Host,
-    input: Option<&str>,
-    input_sample_rate: u32,
-    input_channels: u16,
-    left_channel: usize,
-    right_channel: usize,
+    options: CoreAudioCaptureOptions,
     state: Arc<State>,
     ring_buffer_seconds: usize,
 ) -> AppResult<CaptureSetup> {
+    let CoreAudioCaptureOptions {
+        input,
+        input_sample_rate,
+        input_channels,
+        left_channel,
+        right_channel,
+    } = options;
     validate_coreaudio_selection(input_channels, left_channel, right_channel)?;
-    let device = select_input_device(host, input)?;
+    let device = select_input_device(host, input.as_deref())?;
     let device_name = device_name(&device);
     ensure_input_support(&device, input_sample_rate, input_channels)?;
 
@@ -914,8 +1225,16 @@ fn push_tap_packet(
     packet: &TapPacket<'_>,
     prod: &mut ringbuf::Producer<f32, Arc<HeapRb<f32>>>,
     state: &State,
+    scratch: &mut [f32],
 ) {
     let needed_samples = packet.frames * OUT_CHANNELS;
+    if scratch.len() < needed_samples {
+        state
+            .overflow_frames
+            .fetch_add(packet.frames as u64, Ordering::Relaxed);
+        state.capture_errors.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     if prod.free_len() < needed_samples {
         state
             .overflow_frames
@@ -923,7 +1242,6 @@ fn push_tap_packet(
         return;
     }
 
-    let mut converted = Vec::with_capacity(needed_samples);
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
     for frame in 0..packet.frames {
@@ -936,11 +1254,12 @@ fn push_tap_packet(
         };
         peak_l = peak_l.max(left.abs());
         peak_r = peak_r.max(right.abs());
-        converted.push(left);
-        converted.push(right);
+        scratch[frame * OUT_CHANNELS] = left;
+        scratch[frame * OUT_CHANNELS + 1] = right;
     }
 
-    let pushed = prod.push_slice(&converted);
+    let converted = &scratch[..needed_samples];
+    let pushed = prod.push_slice(converted);
     state
         .captured_frames
         .fetch_add((pushed / OUT_CHANNELS) as u64, Ordering::Relaxed);
@@ -1078,7 +1397,8 @@ async fn run_plain_loop(
     cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
     native_source: &NativeAudioSource,
     state: &Arc<State>,
-) -> AppResult<()> {
+    events: &mut UnboundedReceiver<RoomEvent>,
+) -> AppResult<LoopExit> {
     let mut status_tick = tokio::time::interval(Duration::from_secs(2));
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
@@ -1087,7 +1407,15 @@ async fn run_plain_loop(
         tokio::select! {
             _ = &mut ctrl_c => {
                 eprintln!("Stopping NAB Live...");
-                break;
+                return Ok(LoopExit::UserQuit);
+            }
+            event = events.recv() => {
+                let Some(event) = event else {
+                    return Ok(LoopExit::Reconnect);
+                };
+                if handle_room_event(event, state) {
+                    return Ok(LoopExit::Reconnect);
+                }
             }
             _ = status_tick.tick() => {
                 print_status(state, runtime);
@@ -1097,7 +1425,6 @@ async fn run_plain_loop(
             }
         }
     }
-    Ok(())
 }
 
 async fn run_status_tui(
@@ -1106,7 +1433,8 @@ async fn run_status_tui(
     cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
     native_source: &NativeAudioSource,
     state: &Arc<State>,
-) -> AppResult<()> {
+    events: &mut UnboundedReceiver<RoomEvent>,
+) -> AppResult<LoopExit> {
     enable_raw_mode()?;
     if let Err(err) = execute!(io::stdout(), EnterAlternateScreen) {
         let _ = disable_raw_mode();
@@ -1121,11 +1449,19 @@ async fn run_status_tui(
         }
     };
 
-    let result =
-        run_status_tui_inner(&mut terminal, runtime, pump, cons, native_source, state).await;
+    let result = run_status_tui_inner(
+        &mut terminal,
+        runtime,
+        pump,
+        cons,
+        native_source,
+        state,
+        events,
+    )
+    .await;
     let cleanup_result = cleanup_terminal(&mut terminal);
     match (result, cleanup_result) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(value), Ok(())) => Ok(value),
         (Err(err), _) => Err(err),
         (_, Err(err)) => Err(err),
     }
@@ -1138,7 +1474,8 @@ async fn run_status_tui_inner(
     cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
     native_source: &NativeAudioSource,
     state: &Arc<State>,
-) -> AppResult<()> {
+    events: &mut UnboundedReceiver<RoomEvent>,
+) -> AppResult<LoopExit> {
     let mut draw_tick = tokio::time::interval(Duration::from_millis(100));
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
@@ -1147,7 +1484,15 @@ async fn run_status_tui_inner(
 
     loop {
         tokio::select! {
-            _ = &mut ctrl_c => break,
+            _ = &mut ctrl_c => return Ok(LoopExit::UserQuit),
+            event = events.recv() => {
+                let Some(event) = event else {
+                    return Ok(LoopExit::Reconnect);
+                };
+                if handle_room_event(event, state) {
+                    return Ok(LoopExit::Reconnect);
+                }
+            }
             _ = draw_tick.tick() => {
                 if quit_pending && quit_time.elapsed() > Duration::from_secs(1) {
                     quit_pending = false;
@@ -1159,7 +1504,7 @@ async fn run_status_tui_inner(
                             match key.code {
                                 KeyCode::Char('q') | KeyCode::Esc => {
                                     if quit_pending {
-                                        return Ok(());
+                                        return Ok(LoopExit::UserQuit);
                                     }
                                     quit_pending = true;
                                     quit_time = Instant::now();
@@ -1177,7 +1522,6 @@ async fn run_status_tui_inner(
             }
         }
     }
-    Ok(())
 }
 
 fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, quit_pending: bool) {
@@ -1186,7 +1530,7 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
         .margin(1)
         .constraints([
             Constraint::Length(3),
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -1196,8 +1540,11 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
 
     f.render_widget(
         Paragraph::new(format!(
-            " {}  room={}  identity={}  Running",
-            runtime.livekit_url, runtime.room, runtime.identity
+            " {}  room={}  identity={}  {}",
+            runtime.livekit_url,
+            runtime.room,
+            runtime.identity,
+            connection_label(state.connection_state.load(Ordering::Relaxed))
         ))
         .block(
             Block::default()
@@ -1211,8 +1558,13 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
 
     f.render_widget(
         Paragraph::new(format!(
-            " Source : {}\n Output : 48 kHz stereo Opus/WebRTC",
-            runtime.source_label
+            " Source : {}\n Output : 48 kHz stereo Opus/WebRTC\n Profile: {}  bitrate={} kbps  RED={}  DTX={}  queue={} ms",
+            runtime.source_label,
+            profile_label(runtime.audio_profile),
+            runtime.bitrate / 1000,
+            on_off(runtime.red),
+            on_off(runtime.dtx),
+            runtime.livekit_buffer_ms
         ))
         .block(Block::default().title("Signal").borders(Borders::ALL)),
         rows[1],
@@ -1254,17 +1606,19 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
     let overflow = state.overflow_frames.load(Ordering::Relaxed);
     let underruns = state.underruns.load(Ordering::Relaxed);
     let errors = state.capture_errors.load(Ordering::Relaxed);
+    let livekit_errors = state.livekit_errors.load(Ordering::Relaxed);
+    let reconnects = state.reconnects.load(Ordering::Relaxed);
     let tap_packets = state.tap_packets.load(Ordering::Relaxed);
     let tap_gaps = state.tap_seq_gaps.load(Ordering::Relaxed);
     let tap_drops = state.tap_reported_drops.load(Ordering::Relaxed);
 
     f.render_widget(
         Paragraph::new(format!(
-            "{} Hz  captured={}  sent={}  overflow={}  underrun={}  errors={}",
-            runtime.input_rate, captured, sent, overflow, underruns, errors
+            "{} Hz  captured={}  sent={}  overflow={}  underrun={}  inputErr={}  lkErr={}  reconnect={}",
+            runtime.input_rate, captured, sent, overflow, underruns, errors, livekit_errors, reconnects
         ))
         .block(Block::default().title("Frames").borders(Borders::ALL))
-        .style(Style::default().fg(if overflow > 0 || errors > 0 {
+        .style(Style::default().fg(if overflow > 0 || errors > 0 || livekit_errors > 0 {
             Color::Red
         } else {
             Color::Cyan
@@ -1291,6 +1645,32 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
             })),
         rows[5],
     );
+}
+
+fn profile_label(profile: AudioProfileArg) -> &'static str {
+    match profile {
+        AudioProfileArg::Concert => "concert",
+        AudioProfileArg::Balanced => "balanced",
+        AudioProfileArg::Speech => "speech",
+        AudioProfileArg::LowBandwidth => "low-bandwidth",
+    }
+}
+
+fn connection_label(value: usize) -> &'static str {
+    match value {
+        CONNECTION_CONNECTED => "Connected",
+        CONNECTION_RECONNECTING => "Reconnecting",
+        CONNECTION_DISCONNECTED => "Disconnected",
+        _ => "Connecting",
+    }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 fn validate_coreaudio_selection(
@@ -1392,18 +1772,28 @@ fn print_status(state: &State, runtime: &RuntimeInfo) {
     let overflow = state.overflow_frames.load(Ordering::Relaxed);
     let underruns = state.underruns.load(Ordering::Relaxed);
     let errors = state.capture_errors.load(Ordering::Relaxed);
+    let livekit_errors = state.livekit_errors.load(Ordering::Relaxed);
+    let reconnects = state.reconnects.load(Ordering::Relaxed);
     let buffer_ms = state.ring_buffer_ms.load(Ordering::Relaxed);
 
     eprintln!(
-        "[{}] in={}Hz buffer={}ms captured={} sent={} overflow={} underrun={} errors={}",
+        "[{}] {} profile={} bitrate={}kbps red={} dtx={} queue={}ms in={}Hz buffer={}ms captured={} sent={} overflow={} underrun={} inputErr={} lkErr={} reconnect={}",
         runtime.source_label,
+        connection_label(state.connection_state.load(Ordering::Relaxed)),
+        profile_label(runtime.audio_profile),
+        runtime.bitrate / 1000,
+        on_off(runtime.red),
+        on_off(runtime.dtx),
+        runtime.livekit_buffer_ms,
         runtime.input_rate,
         buffer_ms,
         captured,
         sent,
         overflow,
         underruns,
-        errors
+        errors,
+        livekit_errors,
+        reconnects
     );
 }
 
@@ -1490,5 +1880,5 @@ fn device_name(device: &cpal::Device) -> String {
 }
 
 fn io_error(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, message.into())
+    io::Error::other(message.into())
 }

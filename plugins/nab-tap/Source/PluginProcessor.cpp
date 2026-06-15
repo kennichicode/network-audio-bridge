@@ -3,18 +3,26 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <memory>
+#include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 namespace
 {
-constexpr const char* kSocketPath = "/tmp/nab-tap.sock";
+constexpr const char* kSocketEnv = "NAB_TAP_SOCKET";
+constexpr const char* kSocketRelativePath = "/Library/Caches/KenichiNAB/nab-tap.sock";
+constexpr const char* kFallbackSocketPath = "/tmp/nab-tap.sock";
 constexpr uint32_t kTapVersion = 1;
 constexpr uint16_t kTapChannels = 2;
-constexpr size_t kFramesPerPacket = 128;
+constexpr size_t kFramesPerPacket = 240;
+constexpr size_t kMaxBlockSize = 16384;
+constexpr size_t kMaxRingSeconds = 4;
 
 #pragma pack(push, 1)
 struct TapPacketHeader
@@ -40,12 +48,36 @@ size_t nextPowerOfTwo(size_t value)
     return result;
 }
 
+std::string defaultSocketPath()
+{
+    if (const auto* overridePath = std::getenv(kSocketEnv))
+    {
+        if (overridePath[0] != '\0')
+            return overridePath;
+    }
+
+    if (const auto* home = std::getenv("HOME"))
+    {
+        if (home[0] != '\0')
+            return std::string(home) + kSocketRelativePath;
+    }
+
+    return kFallbackSocketPath;
+}
+
 sockaddr_un makeAddress()
 {
+    const auto path = defaultSocketPath();
     sockaddr_un address {};
     address.sun_family = AF_UNIX;
-    std::strncpy(address.sun_path, kSocketPath, sizeof(address.sun_path) - 1);
+    std::strncpy(address.sun_path, path.c_str(), sizeof(address.sun_path) - 1);
     return address;
+}
+
+bool isSocketPath(const std::string& path) noexcept
+{
+    struct stat info {};
+    return ::lstat(path.c_str(), &info) == 0 && S_ISSOCK(info.st_mode);
 }
 }
 
@@ -66,32 +98,44 @@ void NabTapBridge::prepare(double sampleRate, int maxBlockSize)
     const auto sr = static_cast<uint32_t>(std::max(8000.0, std::min(sampleRate, 384000.0)));
     sampleRateHz.store(sr, std::memory_order_relaxed);
 
-    const auto samplesForFourSeconds = static_cast<size_t>(sr) * kTapChannels * 4;
-    const auto samplesForBlocks = static_cast<size_t>(std::max(1, maxBlockSize)) * kTapChannels * 64;
+    const auto blockSize = std::min(static_cast<size_t>(std::max(1, maxBlockSize)), kMaxBlockSize);
+    const auto samplesForFourSeconds = static_cast<size_t>(sr) * kTapChannels * kMaxRingSeconds;
+    const auto samplesForBlocks = blockSize * kTapChannels * 64;
     const auto capacity = nextPowerOfTwo(std::max(samplesForFourSeconds, samplesForBlocks));
 
-    ring.assign(capacity, 0.0f);
-    ringMask = capacity - 1;
+    std::shared_ptr<NabTapRingState> nextState;
+    try
+    {
+        nextState = std::make_shared<NabTapRingState>(capacity);
+    }
+    catch (...)
+    {
+        socketErrors.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     readIndex.store(0, std::memory_order_relaxed);
     writeIndex.store(0, std::memory_order_relaxed);
     droppedFrames.store(0, std::memory_order_relaxed);
     sequence.store(0, std::memory_order_relaxed);
+    std::atomic_store_explicit(&ringState, nextState, std::memory_order_release);
 
     startThread(juce::Thread::Priority::background);
 }
 
 void NabTapBridge::release()
 {
+    std::shared_ptr<NabTapRingState> empty;
+    std::atomic_store_explicit(&ringState, empty, std::memory_order_release);
     signalThreadShouldExit();
     stopThread(1000);
     resetSocket();
-    ring.clear();
-    ringMask = 0;
 }
 
 void NabTapBridge::pushAudio(const juce::AudioBuffer<float>& buffer) noexcept
 {
-    if (ring.empty())
+    const auto state = std::atomic_load_explicit(&ringState, std::memory_order_acquire);
+    if (! state || state->ring.empty())
         return;
 
     const auto numFrames = buffer.getNumSamples();
@@ -101,7 +145,7 @@ void NabTapBridge::pushAudio(const juce::AudioBuffer<float>& buffer) noexcept
 
     auto read = readIndex.load(std::memory_order_acquire);
     auto write = writeIndex.load(std::memory_order_relaxed);
-    const auto capacity = static_cast<uint64_t>(ring.size());
+    const auto capacity = static_cast<uint64_t>(state->ring.size());
     uint64_t dropped = 0;
 
     for (int frame = 0; frame < numFrames; ++frame)
@@ -114,8 +158,8 @@ void NabTapBridge::pushAudio(const juce::AudioBuffer<float>& buffer) noexcept
 
         const auto l = left != nullptr ? left[frame] : 0.0f;
         const auto r = right != nullptr ? right[frame] : l;
-        ring[static_cast<size_t>(write++) & ringMask] = l;
-        ring[static_cast<size_t>(write++) & ringMask] = r;
+        state->ring[static_cast<size_t>(write++) & state->mask] = l;
+        state->ring[static_cast<size_t>(write++) & state->mask] = r;
     }
 
     if (dropped > 0)
@@ -128,11 +172,34 @@ void NabTapBridge::run()
 {
     std::vector<float> audio(kFramesPerPacket * kTapChannels, 0.0f);
     std::vector<char> packet(sizeof(TapPacketHeader) + audio.size() * sizeof(float), 0);
+    bool receiverWasMissing = true;
 
     while (! threadShouldExit())
     {
+        if (! destinationReady() || ! ensureSocket())
+        {
+            dropBufferedSamples();
+            receiverWasMissing = true;
+            wait(100);
+            continue;
+        }
+
+        if (receiverWasMissing)
+        {
+            dropBufferedSamples();
+            receiverWasMissing = false;
+            wait(2);
+            continue;
+        }
+
+        if (availableSamples() < audio.size())
+        {
+            wait(2);
+            continue;
+        }
+
         const auto samples = popSamples(audio.data(), audio.size());
-        if (samples < kTapChannels)
+        if (samples != audio.size())
         {
             wait(2);
             continue;
@@ -151,12 +218,6 @@ void NabTapBridge::run()
         header->reserved = 0;
 
         std::memcpy(packet.data() + sizeof(TapPacketHeader), audio.data(), samples * sizeof(float));
-
-        if (! ensureSocket())
-        {
-            wait(100);
-            continue;
-        }
 
         auto address = makeAddress();
         const auto bytes = sizeof(TapPacketHeader) + samples * sizeof(float);
@@ -177,6 +238,7 @@ void NabTapBridge::run()
             socketErrors.fetch_add(1, std::memory_order_relaxed);
             if (errno == ENOENT || errno == ECONNREFUSED || errno == EBADF)
                 resetSocket();
+            receiverWasMissing = true;
             wait(5);
         }
     }
@@ -207,11 +269,45 @@ bool NabTapBridge::ensureSocket()
     if (flags >= 0)
         ::fcntl(socketFd, F_SETFL, flags | O_NONBLOCK);
 
+    const auto fdFlags = ::fcntl(socketFd, F_GETFD, 0);
+    if (fdFlags >= 0)
+        ::fcntl(socketFd, F_SETFD, fdFlags | FD_CLOEXEC);
+
     return true;
+}
+
+bool NabTapBridge::destinationReady() const noexcept
+{
+    const auto path = defaultSocketPath();
+    sockaddr_un address {};
+    if (path.size() >= sizeof(address.sun_path))
+        return false;
+
+    return isSocketPath(path);
+}
+
+void NabTapBridge::dropBufferedSamples() noexcept
+{
+    readIndex.store(writeIndex.load(std::memory_order_acquire), std::memory_order_release);
+}
+
+size_t NabTapBridge::availableSamples() const noexcept
+{
+    const auto state = std::atomic_load_explicit(&ringState, std::memory_order_acquire);
+    if (! state)
+        return 0;
+
+    const auto read = readIndex.load(std::memory_order_relaxed);
+    const auto write = writeIndex.load(std::memory_order_acquire);
+    return static_cast<size_t>(write - read);
 }
 
 size_t NabTapBridge::popSamples(float* dest, size_t maxSamples) noexcept
 {
+    const auto state = std::atomic_load_explicit(&ringState, std::memory_order_acquire);
+    if (! state || state->ring.empty())
+        return 0;
+
     auto read = readIndex.load(std::memory_order_relaxed);
     const auto write = writeIndex.load(std::memory_order_acquire);
     auto available = static_cast<size_t>(write - read);
@@ -219,7 +315,7 @@ size_t NabTapBridge::popSamples(float* dest, size_t maxSamples) noexcept
     toRead -= toRead % kTapChannels;
 
     for (size_t i = 0; i < toRead; ++i)
-        dest[i] = ring[static_cast<size_t>(read++) & ringMask];
+        dest[i] = state->ring[static_cast<size_t>(read++) & state->mask];
 
     readIndex.store(read, std::memory_order_release);
     return toRead;

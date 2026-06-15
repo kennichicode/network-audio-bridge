@@ -141,7 +141,7 @@ REAPERのMaster FXまたはMonitor FXに `NAB Tap` VST3プラグインを挿し�
 設計:
 
 ```
-REAPER Master -> NAB Tap plugin -> /tmp/nab-tap.sock -> nab-live -> LiveKit/VPS
+REAPER Master -> NAB Tap plugin -> ~/Library/Caches/KenichiNAB/nab-tap.sock -> nab-live -> LiveKit/VPS
 ```
 
 重要:
@@ -151,6 +151,8 @@ REAPER Master -> NAB Tap plugin -> /tmp/nab-tap.sock -> nab-live -> LiveKit/VPS
 - プラグイン内ではOpus変換やLiveKit接続をしません。
 - Opus変換、SRC、LiveKit送信、再接続、表示は `nab-live` 側で行います。
 - 96kHzのREAPERセッションも想定し、`nab-live` 内で48kHz stereoへ変換します。
+- LiveKit Rust SDKで公開されている音声保護設定として、bitrate / RED / DTX / queueをCLIから設定できます。Opus FECそのものは現SDKの公開オプションではありません。
+- 通常は `Start NAB Live Only.command` を使います。設定を選びたい時だけ `Start NAB Live Wizard.command` を使います。
 
 起動:
 
@@ -159,6 +161,32 @@ nab-live --source plugin
 ```
 
 引数なしで起動すると、旧NAB風の軽量ウィザードが開きます。上下キーとEnterで `REAPER Master Plugin - NAB Tap` を選べます。
+
+主な送信設定:
+
+```bash
+nab-live --source plugin --profile concert
+nab-live --source plugin --profile balanced
+nab-live --source plugin --profile low-bandwidth --bitrate 96000
+nab-live --source plugin --disable-red
+nab-live --source plugin --enable-dtx
+```
+
+プロファイル:
+
+| profile | bitrate | RED | DTX | LiveKit queue | 用途 |
+|---------|---------|-----|-----|---------------|------|
+| concert | 256 kbps | on | off | 1000 ms | REAPER Masterの音楽モニター標準 |
+| balanced | 160 kbps | on | off | 1200 ms | 回線に余裕が少ない時 |
+| speech | 64 kbps | on | on | 800 ms | 会話・確認用 |
+| low-bandwidth | 96 kbps | on | off | 1500 ms | 厳しい回線で音楽を切らさない方向 |
+
+Mac miniでの通常手順:
+
+1. `Install NAB Tap Plugin.command` を一度実行する。
+2. REAPERを起動し、Master FXまたはMonitor FXに `VST3: NAB Tap (Kenichi Kawabata)` を挿す。
+3. `Start NAB Live Only.command` を開いたままにする。
+4. ブラウザで `https://livekit.kenichi-kawabata.com/` を開く。
 
 プラグインのビルド:
 
