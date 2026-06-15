@@ -136,7 +136,7 @@ Drift: +42 ppm  │  ratio: 1.0000420  │  Jitter: 300 ms (+/-)  │  P-Gain: 3
 
 ## nab-live + NAB Tap — REAPER MasterをLiveKitへ送る
 
-REAPERのMaster FXまたはMonitor FXに `NAB Tap` プラグインを挿し、別プロセスの `nab-live` がその音を受けてLiveKitへ送ります。
+REAPERのMaster FXまたはMonitor FXに `NAB Tap` VST3プラグインを挿し、別プロセスの `nab-live` がその音を受けてLiveKitへ送ります。
 
 設計:
 
@@ -146,6 +146,7 @@ REAPER Master -> NAB Tap plugin -> /tmp/nab-tap.sock -> nab-live -> LiveKit/VPS
 
 重要:
 
+- REAPERでは `VST3: NAB Tap (Kenichi Kawabata)` を使います。
 - `NAB Tap` はpass-throughです。音は加工しません。
 - プラグイン内ではOpus変換やLiveKit接続をしません。
 - Opus変換、SRC、LiveKit送信、再接続、表示は `nab-live` 側で行います。

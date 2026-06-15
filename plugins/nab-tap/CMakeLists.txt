@@ -25,7 +25,7 @@ juce_add_plugin(NABTap
     COPY_PLUGIN_AFTER_BUILD FALSE
     PLUGIN_MANUFACTURER_CODE Keni
     PLUGIN_CODE NbTp
-    FORMATS AU VST3
+    FORMATS VST3
     PRODUCT_NAME "NAB Tap")
 
 juce_generate_juce_header(NABTap)

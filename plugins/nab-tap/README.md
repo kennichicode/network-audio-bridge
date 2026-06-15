@@ -1,6 +1,6 @@
 # NAB Tap
 
-NAB Tap is a minimal REAPER master-bus tap for `nab-live`.
+NAB Tap is a minimal REAPER master-bus VST3 tap for `nab-live`.
 
 It is a pass-through JUCE audio plugin. The plugin does not encode Opus, connect to
 LiveKit, or perform network reconnect logic. In the audio callback it only copies
@@ -15,6 +15,12 @@ Build:
 ```bash
 cmake -S plugins/nab-tap -B plugins/nab-tap/build -G Ninja
 cmake --build plugins/nab-tap/build --config Release
+```
+
+The build target is VST3. REAPER should show it as:
+
+```text
+VST3: NAB Tap (Kenichi Kawabata)
 ```
 
 The default JUCE path is:
