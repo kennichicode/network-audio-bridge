@@ -1,18 +1,36 @@
-use clap::Parser;
+use byteorder::{ByteOrder, LittleEndian};
+use clap::{Parser, ValueEnum};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crossterm::{
+    event::{self, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use livekit::options::{AudioEncoding, TrackPublishOptions};
 use livekit::prelude::*;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions};
 use livekit_api::access_token::{AccessToken, VideoGrants};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
+    Terminal,
+};
 use ringbuf::HeapRb;
 use rubato::{FftFixedInOut, Resampler};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::net::UnixDatagram;
 
 #[path = "../log.rs"]
 mod log;
@@ -22,21 +40,45 @@ const OUT_CHANNELS: usize = 2;
 const OUT_FRAME_MS: u32 = 10;
 const OUT_FRAMES_PER_PACKET: usize = (OUT_RATE as usize * OUT_FRAME_MS as usize) / 1000;
 
+const TAP_MAGIC: &[u8; 8] = b"NABTAP1\0";
+const TAP_VERSION: u32 = 1;
+const TAP_HEADER_BYTES: usize = 40;
+const TAP_MAX_PACKET_BYTES: usize = 64 * 1024;
+const DEFAULT_TAP_SOCKET: &str = "/tmp/nab-tap.sock";
+
 type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum SourceArg {
+    Plugin,
+    Coreaudio,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "nab-live")]
-#[command(about = "Capture a CoreAudio stereo input and publish it to LiveKit/WebRTC.")]
+#[command(about = "Publish REAPER/NAB audio to LiveKit/WebRTC with an optional terminal wizard.")]
 struct Args {
-    /// List input devices and exit.
+    /// List CoreAudio input devices and exit.
     #[arg(long)]
     list_devices: bool,
 
-    /// Input device name substring. If omitted, the default input device is used.
+    /// Audio source. If omitted with no --input, a wizard is shown.
+    #[arg(long, value_enum)]
+    source: Option<SourceArg>,
+
+    /// Disable the status TUI and print plain log lines instead.
+    #[arg(long)]
+    no_tui: bool,
+
+    /// Unix socket used by the NAB Tap plugin.
+    #[arg(long, default_value = DEFAULT_TAP_SOCKET)]
+    plugin_socket: String,
+
+    /// CoreAudio input device name substring. Implies --source coreaudio.
     #[arg(long)]
     input: Option<String>,
 
-    /// CoreAudio input sample rate. Use 96000 for a 96kHz Reaper session.
+    /// CoreAudio input sample rate. Use 96000 for a 96kHz REAPER session.
     #[arg(long, default_value_t = 96_000)]
     input_sample_rate: u32,
 
@@ -89,6 +131,28 @@ struct Args {
     ring_buffer_seconds: usize,
 }
 
+#[derive(Clone)]
+enum CaptureConfig {
+    Plugin {
+        socket_path: String,
+    },
+    CoreAudio {
+        input: Option<String>,
+        input_sample_rate: u32,
+        input_channels: u16,
+        left_channel: usize,
+        right_channel: usize,
+    },
+}
+
+struct RuntimeInfo {
+    source_label: String,
+    livekit_url: String,
+    room: String,
+    identity: String,
+    input_rate: u32,
+}
+
 #[derive(Default)]
 struct State {
     captured_frames: AtomicU64,
@@ -97,6 +161,66 @@ struct State {
     underruns: AtomicU64,
     capture_errors: AtomicU64,
     ring_buffer_ms: AtomicUsize,
+    peak_l_milli: AtomicUsize,
+    peak_r_milli: AtomicUsize,
+    tap_packets: AtomicU64,
+    tap_seq_gaps: AtomicU64,
+    tap_reported_drops: AtomicU64,
+}
+
+struct CaptureSetup {
+    input_rate: u32,
+    source_label: String,
+    guard: CaptureGuard,
+    cons: ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
+}
+
+enum CaptureGuard {
+    CoreAudio(cpal::Stream),
+    #[cfg(unix)]
+    Plugin(PluginCaptureGuard),
+}
+
+impl CaptureGuard {
+    fn kind(&self) -> &'static str {
+        match self {
+            CaptureGuard::CoreAudio(stream) => {
+                let _ = stream;
+                "coreaudio"
+            }
+            #[cfg(unix)]
+            CaptureGuard::Plugin(guard) => {
+                let _ = guard.running.load(Ordering::Relaxed);
+                "plugin"
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+struct PluginCaptureGuard {
+    running: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    socket_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for PluginCaptureGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let _ = fs::remove_file(&self.socket_path);
+    }
+}
+
+#[derive(Clone)]
+enum WizardStep {
+    SelectSource { cursor: usize },
+    SelectSampleRate { cursor: usize },
+    SelectInput { devices: Vec<String>, cursor: usize },
+    Confirm,
 }
 
 #[tokio::main]
@@ -111,7 +235,14 @@ async fn main() -> AppResult<()> {
         return Ok(());
     }
 
-    validate_channel_selection(&args)?;
+    let capture_config = if should_show_wizard(&args) {
+        match run_wizard(&host)? {
+            Some(config) => config,
+            None => return Ok(()),
+        }
+    } else {
+        capture_config_from_args(&args)?
+    };
 
     let env = load_env(&args.env_file);
     let livekit_url = normalize_livekit_url(
@@ -131,15 +262,16 @@ async fn main() -> AppResult<()> {
         .or_else(|| read_key(&env, &["LIVEKIT_SECRET", "LIVEKIT_API_SECRET"]))
         .ok_or_else(|| io_error("LIVEKIT_SECRET/LIVEKIT_API_SECRET is missing"))?;
 
-    let device = select_input_device(&host, args.input.as_deref())?;
-    let device_name = device_name(&device);
-    ensure_input_support(&device, args.input_sample_rate, args.input_channels)?;
+    let state = Arc::new(State::default());
+    let mut capture = start_capture(
+        &host,
+        capture_config,
+        Arc::clone(&state),
+        args.ring_buffer_seconds,
+    )?;
+    let _capture_guard_kind = capture.guard.kind();
 
-    eprintln!("NAB Live input: {device_name}");
-    eprintln!(
-        "Capture: {} Hz, {}ch, L={}, R={}",
-        args.input_sample_rate, args.input_channels, args.left_channel, args.right_channel
-    );
+    eprintln!("NAB Live source: {}", capture.source_label);
     eprintln!(
         "Publish: {} room={} identity={}",
         livekit_url, args.room, args.identity
@@ -158,10 +290,10 @@ async fn main() -> AppResult<()> {
         .to_jwt()?;
 
     let (room, mut events) = Room::connect(&livekit_url, &token, RoomOptions::default()).await?;
-    let event_state = args.identity.clone();
+    let event_identity = args.identity.clone();
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {
-            log::log(&format!("{event_state}: LiveKit event: {event:?}"));
+            log::log(&format!("{event_identity}: LiveKit event: {event:?}"));
         }
     });
 
@@ -192,31 +324,493 @@ async fn main() -> AppResult<()> {
         .await?;
     eprintln!("Published track SID: {}", publication.sid());
 
-    let state = Arc::new(State::default());
-    let ring_capacity = args.input_sample_rate.max(OUT_RATE) as usize
-        * OUT_CHANNELS
-        * args.ring_buffer_seconds.max(1);
-    let rb = HeapRb::<f32>::new(ring_capacity);
-    let (mut prod, mut cons) = rb.split();
+    let mut pump = AudioPump::new(capture.input_rate)?;
+    wait_for_initial_buffer(&mut capture.cons, capture.input_rate).await;
 
-    let left_index = args.left_channel - 1;
-    let right_index = args.right_channel - 1;
-    let input_channels = args.input_channels as usize;
+    let runtime = RuntimeInfo {
+        source_label: capture.source_label.clone(),
+        livekit_url: livekit_url.clone(),
+        room: args.room.clone(),
+        identity: args.identity.clone(),
+        input_rate: capture.input_rate,
+    };
+
+    let use_tui = !args.no_tui && io::stdout().is_terminal();
+    let loop_result = if use_tui {
+        run_status_tui(
+            &runtime,
+            &mut pump,
+            &mut capture.cons,
+            &native_source,
+            &state,
+        )
+        .await
+    } else {
+        run_plain_loop(
+            &runtime,
+            &mut pump,
+            &mut capture.cons,
+            &native_source,
+            &state,
+        )
+        .await
+    };
+
+    let _ = room
+        .local_participant()
+        .unpublish_track(&publication.sid())
+        .await;
+    let _ = room.close().await;
+    drop(capture);
+    loop_result
+}
+
+fn should_show_wizard(args: &Args) -> bool {
+    args.source.is_none() && args.input.is_none()
+}
+
+fn capture_config_from_args(args: &Args) -> AppResult<CaptureConfig> {
+    match args.source.unwrap_or(SourceArg::Coreaudio) {
+        SourceArg::Plugin => Ok(CaptureConfig::Plugin {
+            socket_path: args.plugin_socket.clone(),
+        }),
+        SourceArg::Coreaudio => {
+            validate_coreaudio_selection(
+                args.input_channels,
+                args.left_channel,
+                args.right_channel,
+            )?;
+            Ok(CaptureConfig::CoreAudio {
+                input: args.input.clone(),
+                input_sample_rate: args.input_sample_rate,
+                input_channels: args.input_channels,
+                left_channel: args.left_channel,
+                right_channel: args.right_channel,
+            })
+        }
+    }
+}
+
+fn run_wizard(host: &cpal::Host) -> AppResult<Option<CaptureConfig>> {
+    let input_devices: Vec<String> = host
+        .input_devices()
+        .map(|d| d.filter_map(|x| x.name().ok()).collect())
+        .unwrap_or_default();
+
+    enable_raw_mode()?;
+    if let Err(err) = execute!(io::stdout(), EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(err.into());
+    }
+
+    let mut terminal = match Terminal::new(CrosstermBackend::new(io::stdout())) {
+        Ok(terminal) => terminal,
+        Err(err) => {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            return Err(err.into());
+        }
+    };
+
+    let result = run_wizard_inner(&mut terminal, &input_devices);
+    let cleanup_result = cleanup_terminal(&mut terminal);
+    match (result, cleanup_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), _) => Err(err),
+        (_, Err(err)) => Err(err),
+    }
+}
+
+fn run_wizard_inner(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    input_devices: &[String],
+) -> AppResult<Option<CaptureConfig>> {
+    let mut step = WizardStep::SelectSource { cursor: 0 };
+    let mut source = SourceArg::Plugin;
+    let mut sample_rate = 96_000;
+    let mut input: Option<String> = None;
+
+    loop {
+        terminal.draw(|f| draw_wizard(f, &step))?;
+
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+
+        match event::read()? {
+            Event::Resize(_, _) => {
+                terminal.autoresize()?;
+            }
+            Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => match &mut step
+            {
+                WizardStep::SelectSource { cursor } => match key.code {
+                    KeyCode::Up => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down => *cursor = (*cursor + 1).min(1),
+                    KeyCode::Enter => {
+                        source = if *cursor == 0 {
+                            SourceArg::Plugin
+                        } else {
+                            SourceArg::Coreaudio
+                        };
+                        step = if source == SourceArg::Plugin {
+                            WizardStep::Confirm
+                        } else {
+                            WizardStep::SelectSampleRate { cursor: 1 }
+                        };
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                    _ => {}
+                },
+                WizardStep::SelectSampleRate { cursor } => match key.code {
+                    KeyCode::Up => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down => *cursor = (*cursor + 1).min(SAMPLE_RATES.len() - 1),
+                    KeyCode::Enter => {
+                        sample_rate = SAMPLE_RATES[*cursor].0;
+                        step = WizardStep::SelectInput {
+                            devices: input_devices.to_vec(),
+                            cursor: 0,
+                        };
+                    }
+                    KeyCode::Esc => return Ok(None),
+                    _ => {}
+                },
+                WizardStep::SelectInput { devices, cursor } => match key.code {
+                    KeyCode::Up => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down => {
+                        *cursor = (*cursor + 1).min(devices.len().saturating_sub(1));
+                    }
+                    KeyCode::Enter => {
+                        input = devices.get(*cursor).cloned();
+                        step = WizardStep::Confirm;
+                    }
+                    KeyCode::Esc => return Ok(None),
+                    _ => {}
+                },
+                WizardStep::Confirm => match key.code {
+                    KeyCode::Enter => {
+                        return Ok(Some(match source {
+                            SourceArg::Plugin => CaptureConfig::Plugin {
+                                socket_path: DEFAULT_TAP_SOCKET.to_string(),
+                            },
+                            SourceArg::Coreaudio => CaptureConfig::CoreAudio {
+                                input: input.clone(),
+                                input_sample_rate: sample_rate,
+                                input_channels: OUT_CHANNELS as u16,
+                                left_channel: 1,
+                                right_channel: 2,
+                            },
+                        }));
+                    }
+                    KeyCode::Esc => return Ok(None),
+                    _ => {}
+                },
+            },
+            _ => {}
+        }
+    }
+}
+
+const SAMPLE_RATES: &[(u32, &str)] = &[
+    (48_000, "48 kHz"),
+    (96_000, "96 kHz"),
+    (44_100, "44.1 kHz"),
+    (88_200, "88.2 kHz"),
+    (176_400, "176.4 kHz"),
+    (192_000, "192 kHz"),
+];
+
+fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
+    let outer = Block::default()
+        .title(" NAB Live Setup ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    f.render_widget(outer, f.area());
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(4),
+            Constraint::Length(2),
+        ])
+        .split(f.area());
+
+    match step {
+        WizardStep::SelectSource { cursor } => {
+            f.render_widget(
+                Paragraph::new("Select audio source").style(Style::default().fg(Color::Yellow)),
+                layout[0],
+            );
+            let options = [
+                "REAPER Master Plugin - NAB Tap (recommended)",
+                "CoreAudio input - device/channel capture",
+            ];
+            draw_select_list(f, layout[1], &options, *cursor);
+            draw_wizard_help(f, layout[2]);
+        }
+        WizardStep::SelectSampleRate { cursor } => {
+            f.render_widget(
+                Paragraph::new("Select CoreAudio input sample rate")
+                    .style(Style::default().fg(Color::Yellow)),
+                layout[0],
+            );
+            let options: Vec<&str> = SAMPLE_RATES.iter().map(|(_, label)| *label).collect();
+            draw_select_list(f, layout[1], &options, *cursor);
+            draw_wizard_help(f, layout[2]);
+        }
+        WizardStep::SelectInput { devices, cursor } => {
+            f.render_widget(
+                Paragraph::new("Select CoreAudio input device")
+                    .style(Style::default().fg(Color::Yellow)),
+                layout[0],
+            );
+            let options: Vec<&str> = devices.iter().map(String::as_str).collect();
+            draw_select_list(f, layout[1], &options, *cursor);
+            draw_wizard_help(f, layout[2]);
+        }
+        WizardStep::Confirm => {
+            f.render_widget(
+                Paragraph::new("Ready").style(Style::default().fg(Color::Yellow)),
+                layout[0],
+            );
+            f.render_widget(
+                Paragraph::new("Press Enter to start. Press Esc to quit.")
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::Cyan)),
+                    )
+                    .style(Style::default().fg(Color::Cyan)),
+                layout[1],
+            );
+            f.render_widget(
+                Paragraph::new("Enter Start   Esc Quit")
+                    .style(Style::default().fg(Color::DarkGray)),
+                layout[2],
+            );
+        }
+    }
+}
+
+fn draw_select_list(
+    f: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    options: &[&str],
+    cursor: usize,
+) {
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, &label)| {
+            let item = ListItem::new(format!("  {label}"));
+            if i == cursor {
+                item.style(Style::default().fg(Color::Black).bg(Color::Cyan))
+            } else {
+                item
+            }
+        })
+        .collect();
+    let mut state = ListState::default();
+    if !options.is_empty() {
+        state.select(Some(cursor.min(options.len() - 1)));
+    }
+    f.render_stateful_widget(List::new(items), area, &mut state);
+}
+
+fn draw_wizard_help(f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    f.render_widget(
+        Paragraph::new("Up/Down Select   Enter Confirm   Esc Quit")
+            .style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
+}
+
+fn cleanup_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> AppResult<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    Ok(())
+}
+
+fn start_capture(
+    host: &cpal::Host,
+    config: CaptureConfig,
+    state: Arc<State>,
+    ring_buffer_seconds: usize,
+) -> AppResult<CaptureSetup> {
+    match config {
+        CaptureConfig::Plugin { socket_path } => {
+            start_plugin_capture(&socket_path, state, ring_buffer_seconds)
+        }
+        CaptureConfig::CoreAudio {
+            input,
+            input_sample_rate,
+            input_channels,
+            left_channel,
+            right_channel,
+        } => start_coreaudio_capture(
+            host,
+            input.as_deref(),
+            input_sample_rate,
+            input_channels,
+            left_channel,
+            right_channel,
+            state,
+            ring_buffer_seconds,
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn start_plugin_capture(
+    socket_path: &str,
+    state: Arc<State>,
+    ring_buffer_seconds: usize,
+) -> AppResult<CaptureSetup> {
+    let socket_path = expand_tilde(socket_path);
+    if socket_path.exists() {
+        fs::remove_file(&socket_path)?;
+    }
+    let socket = UnixDatagram::bind(&socket_path)?;
+    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+
+    eprintln!(
+        "Waiting for NAB Tap plugin at {} ...",
+        socket_path.display()
+    );
+
+    let mut buf = vec![0u8; TAP_MAX_PACKET_BYTES];
+    let (first_packet_bytes, first_packet) = loop {
+        match socket.recv(&mut buf) {
+            Ok(amt) => match parse_tap_packet(&buf[..amt]) {
+                Ok(packet) => {
+                    let bytes = buf[..amt].to_vec();
+                    break (bytes, packet.into_owned());
+                }
+                Err(err) => {
+                    state.capture_errors.fetch_add(1, Ordering::Relaxed);
+                    log::log(&format!("tap packet ignored: {err}"));
+                }
+            },
+            Err(err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err.into()),
+        }
+    };
+
+    let input_rate = first_packet.sample_rate;
+    let ring_capacity =
+        input_rate.max(OUT_RATE) as usize * OUT_CHANNELS * ring_buffer_seconds.max(1);
+    let rb = HeapRb::<f32>::new(ring_capacity);
+    let (mut prod, cons) = rb.split();
+    push_tap_packet(&first_packet, &mut prod, &state);
+
+    let running = Arc::new(AtomicBool::new(true));
+    let running_thread = Arc::clone(&running);
+    let state_thread = Arc::clone(&state);
+    let handle = thread::spawn(move || {
+        let mut expected_seq = first_packet.seq.wrapping_add(1);
+        drop(first_packet_bytes);
+        let mut recv_buf = vec![0u8; TAP_MAX_PACKET_BYTES];
+        while running_thread.load(Ordering::Relaxed) {
+            match socket.recv(&mut recv_buf) {
+                Ok(amt) => match parse_tap_packet(&recv_buf[..amt]) {
+                    Ok(packet) => {
+                        if packet.seq != expected_seq {
+                            state_thread.tap_seq_gaps.fetch_add(1, Ordering::Relaxed);
+                        }
+                        expected_seq = packet.seq.wrapping_add(1);
+                        push_tap_packet(&packet, &mut prod, &state_thread);
+                    }
+                    Err(err) => {
+                        state_thread.capture_errors.fetch_add(1, Ordering::Relaxed);
+                        log::log(&format!("tap packet ignored: {err}"));
+                    }
+                },
+                Err(err)
+                    if err.kind() == io::ErrorKind::WouldBlock
+                        || err.kind() == io::ErrorKind::TimedOut =>
+                {
+                    continue;
+                }
+                Err(err) => {
+                    state_thread.capture_errors.fetch_add(1, Ordering::Relaxed);
+                    log::log(&format!("tap socket error: {err}"));
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    });
+
+    Ok(CaptureSetup {
+        input_rate,
+        source_label: format!("NAB Tap plugin ({input_rate} Hz)"),
+        guard: CaptureGuard::Plugin(PluginCaptureGuard {
+            running,
+            handle: Some(handle),
+            socket_path,
+        }),
+        cons,
+    })
+}
+
+#[cfg(not(unix))]
+fn start_plugin_capture(
+    _socket_path: &str,
+    _state: Arc<State>,
+    _ring_buffer_seconds: usize,
+) -> AppResult<CaptureSetup> {
+    Err(io_error("NAB Tap plugin IPC is only supported on macOS/Linux").into())
+}
+
+fn start_coreaudio_capture(
+    host: &cpal::Host,
+    input: Option<&str>,
+    input_sample_rate: u32,
+    input_channels: u16,
+    left_channel: usize,
+    right_channel: usize,
+    state: Arc<State>,
+    ring_buffer_seconds: usize,
+) -> AppResult<CaptureSetup> {
+    validate_coreaudio_selection(input_channels, left_channel, right_channel)?;
+    let device = select_input_device(host, input)?;
+    let device_name = device_name(&device);
+    ensure_input_support(&device, input_sample_rate, input_channels)?;
+
+    let ring_capacity =
+        input_sample_rate.max(OUT_RATE) as usize * OUT_CHANNELS * ring_buffer_seconds.max(1);
+    let rb = HeapRb::<f32>::new(ring_capacity);
+    let (mut prod, cons) = rb.split();
+
+    let left_index = left_channel - 1;
+    let right_index = right_channel - 1;
+    let input_channels_usize = input_channels as usize;
     let state_cb = Arc::clone(&state);
     let input_stream = device.build_input_stream(
         &cpal::StreamConfig {
-            channels: args.input_channels,
-            sample_rate: cpal::SampleRate(args.input_sample_rate),
+            channels: input_channels,
+            sample_rate: cpal::SampleRate(input_sample_rate),
             buffer_size: cpal::BufferSize::Default,
         },
         move |data: &[f32], _| {
-            for frame in data.chunks(input_channels) {
+            let mut peak_l = 0.0f32;
+            let mut peak_r = 0.0f32;
+            for frame in data.chunks(input_channels_usize) {
                 if frame.len() <= left_index || frame.len() <= right_index {
                     state_cb.capture_errors.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
+                let left = frame[left_index];
+                let right = frame[right_index];
+                peak_l = peak_l.max(left.abs());
+                peak_r = peak_r.max(right.abs());
                 if prod.free_len() >= OUT_CHANNELS {
-                    let pair = [frame[left_index], frame[right_index]];
+                    let pair = [left, right];
                     let pushed = prod.push_slice(&pair);
                     if pushed == OUT_CHANNELS {
                         state_cb.captured_frames.fetch_add(1, Ordering::Relaxed);
@@ -227,6 +821,7 @@ async fn main() -> AppResult<()> {
                     state_cb.overflow_frames.fetch_add(1, Ordering::Relaxed);
                 }
             }
+            store_peak(&state_cb, peak_l, peak_r);
         },
         {
             let state_err = Arc::clone(&state);
@@ -239,35 +834,138 @@ async fn main() -> AppResult<()> {
     )?;
     input_stream.play()?;
 
-    let mut pump = AudioPump::new(args.input_sample_rate)?;
-    wait_for_initial_buffer(&mut cons, args.input_sample_rate).await;
+    Ok(CaptureSetup {
+        input_rate: input_sample_rate,
+        source_label: format!(
+            "{} / {} Hz / {}ch / L{} R{}",
+            device_name, input_sample_rate, input_channels, left_channel, right_channel
+        ),
+        guard: CaptureGuard::CoreAudio(input_stream),
+        cons,
+    })
+}
 
-    let mut status_tick = tokio::time::interval(Duration::from_secs(2));
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
+#[derive(Clone)]
+struct TapPacket<'a> {
+    sample_rate: u32,
+    channels: usize,
+    frames: usize,
+    seq: u64,
+    dropped_frames: u64,
+    payload: std::borrow::Cow<'a, [u8]>,
+}
 
-    loop {
-        tokio::select! {
-            _ = &mut ctrl_c => {
-                eprintln!("Stopping NAB Live...");
-                break;
-            }
-            _ = status_tick.tick() => {
-                print_status(&state, &device_name, args.input_sample_rate);
-            }
-            result = pump.send_next_frame(&mut cons, &native_source, &state) => {
-                result?;
-            }
+impl<'a> TapPacket<'a> {
+    fn into_owned(self) -> TapPacket<'static> {
+        TapPacket {
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            frames: self.frames,
+            seq: self.seq,
+            dropped_frames: self.dropped_frames,
+            payload: std::borrow::Cow::Owned(self.payload.into_owned()),
         }
     }
+}
 
-    let _ = room
-        .local_participant()
-        .unpublish_track(&publication.sid())
-        .await;
-    let _ = room.close().await;
-    drop(input_stream);
-    Ok(())
+fn parse_tap_packet(buf: &[u8]) -> Result<TapPacket<'_>, String> {
+    if buf.len() < TAP_HEADER_BYTES {
+        return Err("packet too short".to_string());
+    }
+    if &buf[0..8] != TAP_MAGIC {
+        return Err("bad tap magic".to_string());
+    }
+    let version = LittleEndian::read_u32(&buf[8..12]);
+    if version != TAP_VERSION {
+        return Err(format!("unsupported tap version {version}"));
+    }
+    let sample_rate = LittleEndian::read_u32(&buf[12..16]);
+    let channels = LittleEndian::read_u16(&buf[16..18]) as usize;
+    let frames = LittleEndian::read_u16(&buf[18..20]) as usize;
+    let seq = LittleEndian::read_u64(&buf[20..28]);
+    let dropped_frames = LittleEndian::read_u64(&buf[28..36]);
+
+    if !(8_000..=384_000).contains(&sample_rate) {
+        return Err(format!("invalid sample rate {sample_rate}"));
+    }
+    if channels == 0 || channels > 64 {
+        return Err(format!("invalid channel count {channels}"));
+    }
+    if frames == 0 {
+        return Err("empty packet".to_string());
+    }
+
+    let needed = TAP_HEADER_BYTES + frames * channels * std::mem::size_of::<f32>();
+    if buf.len() < needed {
+        return Err(format!("short payload got={} need={}", buf.len(), needed));
+    }
+
+    Ok(TapPacket {
+        sample_rate,
+        channels,
+        frames,
+        seq,
+        dropped_frames,
+        payload: std::borrow::Cow::Borrowed(&buf[TAP_HEADER_BYTES..needed]),
+    })
+}
+
+fn push_tap_packet(
+    packet: &TapPacket<'_>,
+    prod: &mut ringbuf::Producer<f32, Arc<HeapRb<f32>>>,
+    state: &State,
+) {
+    let needed_samples = packet.frames * OUT_CHANNELS;
+    if prod.free_len() < needed_samples {
+        state
+            .overflow_frames
+            .fetch_add(packet.frames as u64, Ordering::Relaxed);
+        return;
+    }
+
+    let mut converted = Vec::with_capacity(needed_samples);
+    let mut peak_l = 0.0f32;
+    let mut peak_r = 0.0f32;
+    for frame in 0..packet.frames {
+        let base = frame * packet.channels * std::mem::size_of::<f32>();
+        let left = LittleEndian::read_f32(&packet.payload[base..base + 4]);
+        let right = if packet.channels > 1 {
+            LittleEndian::read_f32(&packet.payload[base + 4..base + 8])
+        } else {
+            left
+        };
+        peak_l = peak_l.max(left.abs());
+        peak_r = peak_r.max(right.abs());
+        converted.push(left);
+        converted.push(right);
+    }
+
+    let pushed = prod.push_slice(&converted);
+    state
+        .captured_frames
+        .fetch_add((pushed / OUT_CHANNELS) as u64, Ordering::Relaxed);
+    if pushed != converted.len() {
+        state.overflow_frames.fetch_add(
+            ((converted.len() - pushed) / OUT_CHANNELS) as u64,
+            Ordering::Relaxed,
+        );
+    }
+    state.tap_packets.fetch_add(1, Ordering::Relaxed);
+    state
+        .tap_reported_drops
+        .store(packet.dropped_frames, Ordering::Relaxed);
+    store_peak(state, peak_l, peak_r);
+}
+
+fn store_peak(state: &State, peak_l: f32, peak_r: f32) {
+    state.peak_l_milli.store(
+        ((peak_l.clamp(0.0, 1.0) * 1000.0).round() as usize).min(1000),
+        Ordering::Relaxed,
+    );
+    state.peak_r_milli.store(
+        ((peak_r.clamp(0.0, 1.0) * 1000.0).round() as usize).min(1000),
+        Ordering::Relaxed,
+    );
 }
 
 struct AudioPump {
@@ -374,16 +1072,239 @@ impl AudioPump {
     }
 }
 
-fn validate_channel_selection(args: &Args) -> AppResult<()> {
-    if args.input_channels == 0 {
+async fn run_plain_loop(
+    runtime: &RuntimeInfo,
+    pump: &mut AudioPump,
+    cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
+    native_source: &NativeAudioSource,
+    state: &Arc<State>,
+) -> AppResult<()> {
+    let mut status_tick = tokio::time::interval(Duration::from_secs(2));
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                eprintln!("Stopping NAB Live...");
+                break;
+            }
+            _ = status_tick.tick() => {
+                print_status(state, runtime);
+            }
+            result = pump.send_next_frame(cons, native_source, state) => {
+                result?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_status_tui(
+    runtime: &RuntimeInfo,
+    pump: &mut AudioPump,
+    cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
+    native_source: &NativeAudioSource,
+    state: &Arc<State>,
+) -> AppResult<()> {
+    enable_raw_mode()?;
+    if let Err(err) = execute!(io::stdout(), EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(err.into());
+    }
+    let mut terminal = match Terminal::new(CrosstermBackend::new(io::stdout())) {
+        Ok(terminal) => terminal,
+        Err(err) => {
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            return Err(err.into());
+        }
+    };
+
+    let result =
+        run_status_tui_inner(&mut terminal, runtime, pump, cons, native_source, state).await;
+    let cleanup_result = cleanup_terminal(&mut terminal);
+    match (result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(err), _) => Err(err),
+        (_, Err(err)) => Err(err),
+    }
+}
+
+async fn run_status_tui_inner(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    runtime: &RuntimeInfo,
+    pump: &mut AudioPump,
+    cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
+    native_source: &NativeAudioSource,
+    state: &Arc<State>,
+) -> AppResult<()> {
+    let mut draw_tick = tokio::time::interval(Duration::from_millis(100));
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    let mut quit_pending = false;
+    let mut quit_time = Instant::now();
+
+    loop {
+        tokio::select! {
+            _ = &mut ctrl_c => break,
+            _ = draw_tick.tick() => {
+                if quit_pending && quit_time.elapsed() > Duration::from_secs(1) {
+                    quit_pending = false;
+                }
+                terminal.draw(|f| draw_status(f, runtime, state, quit_pending))?;
+                while event::poll(Duration::from_millis(0))? {
+                    match event::read()? {
+                        Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => {
+                                    if quit_pending {
+                                        return Ok(());
+                                    }
+                                    quit_pending = true;
+                                    quit_time = Instant::now();
+                                }
+                                _ => {}
+                            }
+                        }
+                        Event::Resize(_, _) => terminal.autoresize()?,
+                        _ => {}
+                    }
+                }
+            }
+            result = pump.send_next_frame(cons, native_source, state) => {
+                result?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, quit_pending: bool) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+        ])
+        .split(f.area());
+
+    f.render_widget(
+        Paragraph::new(format!(
+            " {}  room={}  identity={}  Running",
+            runtime.livekit_url, runtime.room, runtime.identity
+        ))
+        .block(
+            Block::default()
+                .title("NAB Live")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .style(Style::default().fg(Color::Cyan)),
+        rows[0],
+    );
+
+    f.render_widget(
+        Paragraph::new(format!(
+            " Source : {}\n Output : 48 kHz stereo Opus/WebRTC",
+            runtime.source_label
+        ))
+        .block(Block::default().title("Signal").borders(Borders::ALL)),
+        rows[1],
+    );
+
+    let buffer_ms = state.ring_buffer_ms.load(Ordering::Relaxed);
+    let buffer_pct = ((buffer_ms * 100) / 1000).min(100) as u16;
+    f.render_widget(
+        Gauge::default()
+            .block(Block::default().title("Local Buffer").borders(Borders::ALL))
+            .gauge_style(Style::default().fg(Color::Cyan))
+            .percent(buffer_pct)
+            .label(format!("{buffer_ms} ms")),
+        rows[2],
+    );
+
+    let peak_l = state.peak_l_milli.load(Ordering::Relaxed);
+    let peak_r = state.peak_r_milli.load(Ordering::Relaxed);
+    let peak_pct = ((peak_l.max(peak_r) * 100) / 1000).min(100) as u16;
+    f.render_widget(
+        Gauge::default()
+            .block(Block::default().title("Input Level").borders(Borders::ALL))
+            .gauge_style(Style::default().fg(if peak_pct >= 98 {
+                Color::Red
+            } else {
+                Color::Green
+            }))
+            .percent(peak_pct)
+            .label(format!(
+                "L {:.3}  R {:.3}",
+                peak_l as f32 / 1000.0,
+                peak_r as f32 / 1000.0
+            )),
+        rows[3],
+    );
+
+    let captured = state.captured_frames.load(Ordering::Relaxed);
+    let sent = state.sent_frames.load(Ordering::Relaxed);
+    let overflow = state.overflow_frames.load(Ordering::Relaxed);
+    let underruns = state.underruns.load(Ordering::Relaxed);
+    let errors = state.capture_errors.load(Ordering::Relaxed);
+    let tap_packets = state.tap_packets.load(Ordering::Relaxed);
+    let tap_gaps = state.tap_seq_gaps.load(Ordering::Relaxed);
+    let tap_drops = state.tap_reported_drops.load(Ordering::Relaxed);
+
+    f.render_widget(
+        Paragraph::new(format!(
+            "{} Hz  captured={}  sent={}  overflow={}  underrun={}  errors={}",
+            runtime.input_rate, captured, sent, overflow, underruns, errors
+        ))
+        .block(Block::default().title("Frames").borders(Borders::ALL))
+        .style(Style::default().fg(if overflow > 0 || errors > 0 {
+            Color::Red
+        } else {
+            Color::Cyan
+        })),
+        rows[4],
+    );
+
+    let help = if quit_pending {
+        "Tap packets: ".to_string()
+            + &format!(
+                "{tap_packets}  gaps={tap_gaps}  pluginDrops={tap_drops}   press again to quit"
+            )
+    } else {
+        "Tap packets: ".to_string()
+            + &format!("{tap_packets}  gaps={tap_gaps}  pluginDrops={tap_drops}   q Quit")
+    };
+    f.render_widget(
+        Paragraph::new(help)
+            .block(Block::default().title("Status").borders(Borders::ALL))
+            .style(Style::default().fg(if quit_pending {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            })),
+        rows[5],
+    );
+}
+
+fn validate_coreaudio_selection(
+    input_channels: u16,
+    left_channel: usize,
+    right_channel: usize,
+) -> AppResult<()> {
+    if input_channels == 0 {
         return Err(io_error("input_channels must be greater than zero").into());
     }
-    if args.left_channel == 0 || args.right_channel == 0 {
+    if left_channel == 0 || right_channel == 0 {
         return Err(io_error("left_channel/right_channel are 1-based").into());
     }
-    if args.left_channel > args.input_channels as usize
-        || args.right_channel > args.input_channels as usize
-    {
+    if left_channel > input_channels as usize || right_channel > input_channels as usize {
         return Err(io_error("left/right channel must be within input_channels").into());
     }
     Ok(())
@@ -465,7 +1386,7 @@ async fn wait_for_initial_buffer(
     }
 }
 
-fn print_status(state: &State, device_name: &str, input_rate: u32) {
+fn print_status(state: &State, runtime: &RuntimeInfo) {
     let captured = state.captured_frames.load(Ordering::Relaxed);
     let sent = state.sent_frames.load(Ordering::Relaxed);
     let overflow = state.overflow_frames.load(Ordering::Relaxed);
@@ -474,8 +1395,15 @@ fn print_status(state: &State, device_name: &str, input_rate: u32) {
     let buffer_ms = state.ring_buffer_ms.load(Ordering::Relaxed);
 
     eprintln!(
-        "[{device_name}] in={}Hz buffer={}ms captured={} sent={} overflow={} underrun={} errors={}",
-        input_rate, buffer_ms, captured, sent, overflow, underruns, errors
+        "[{}] in={}Hz buffer={}ms captured={} sent={} overflow={} underrun={} errors={}",
+        runtime.source_label,
+        runtime.input_rate,
+        buffer_ms,
+        captured,
+        sent,
+        overflow,
+        underruns,
+        errors
     );
 }
 
@@ -561,6 +1489,6 @@ fn device_name(device: &cpal::Device) -> String {
         .unwrap_or_else(|_| "Unknown input device".to_string())
 }
 
-fn io_error(message: impl Into<String>) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, message.into())
+fn io_error(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, message.into())
 }

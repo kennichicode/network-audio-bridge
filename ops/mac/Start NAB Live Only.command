@@ -2,10 +2,6 @@
 set -euo pipefail
 
 exec "$HOME/NetworkAudioBridge/nab-live" \
-  --input "BlackHole 2ch" \
-  --input-sample-rate 96000 \
-  --input-channels 2 \
-  --left-channel 1 \
-  --right-channel 2 \
+  --source plugin \
   --room "reaper-master" \
   --identity "nab-live-mac-mini"

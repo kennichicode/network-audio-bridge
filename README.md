@@ -8,6 +8,7 @@ UDP経由でオーディオをリアルタイム送受信するターミナル�
 |----------|------|
 | `nab` / `nab.exe` | 送信・受信・双方向の全モード対応（オリジナル） |
 | `nab-recv` / `nab-recv.exe` | **受信専用 v2** — アダプティブSRCによるクロックドリフト補正。音切れしにくい |
+| `nab-live` | **LiveKit送信用** — REAPER Master/NAB Tap またはCoreAudio入力を48kHz Opus/WebRTCでVPSへ送る |
 
 ---
 
@@ -133,16 +134,50 @@ Drift: +42 ppm  │  ratio: 1.0000420  │  Jitter: 300 ms (+/-)  │  P-Gain: 3
 
 ---
 
+## nab-live + NAB Tap — REAPER MasterをLiveKitへ送る
+
+REAPERのMaster FXまたはMonitor FXに `NAB Tap` プラグインを挿し、別プロセスの `nab-live` がその音を受けてLiveKitへ送ります。
+
+設計:
+
+```
+REAPER Master -> NAB Tap plugin -> /tmp/nab-tap.sock -> nab-live -> LiveKit/VPS
+```
+
+重要:
+
+- `NAB Tap` はpass-throughです。音は加工しません。
+- プラグイン内ではOpus変換やLiveKit接続をしません。
+- Opus変換、SRC、LiveKit送信、再接続、表示は `nab-live` 側で行います。
+- 96kHzのREAPERセッションも想定し、`nab-live` 内で48kHz stereoへ変換します。
+
+起動:
+
+```bash
+nab-live --source plugin
+```
+
+引数なしで起動すると、旧NAB風の軽量ウィザードが開きます。上下キーとEnterで `REAPER Master Plugin - NAB Tap` を選べます。
+
+プラグインのビルド:
+
+```bash
+cmake -S plugins/nab-tap -B plugins/nab-tap/build -DCMAKE_BUILD_TYPE=Release
+cmake --build plugins/nab-tap/build --config Release
+```
+
+---
+
 ## 仕様
 
-| 項目 | nab | nab-recv |
-|------|-----|----------|
-| モード | 送信 / 受信 / 双方向 | 受信専用 |
-| サンプルレート | 44.1〜192 kHz（6択） | 44.1〜192 kHz（6択） |
-| チャンネル | ステレオ（2ch） | ステレオ（2ch） |
-| プロトコル | UDP | UDP（同一フォーマット） |
-| ポート | 8000（固定） | 起動時に指定（デフォルト8000） |
-| ドリフト補正 | なし（ジッターバッファのみ） | **アダプティブSRC（rubato）** |
+| 項目 | nab | nab-recv | nab-live |
+|------|-----|----------|----------|
+| モード | 送信 / 受信 / 双方向 | 受信専用 | LiveKit送信 |
+| サンプルレート | 44.1〜192 kHz（6択） | 44.1〜192 kHz（6択） | 入力48〜192 kHz想定、出力48 kHz |
+| チャンネル | ステレオ（2ch） | ステレオ（2ch） | ステレオ（2ch） |
+| プロトコル | UDP | UDP（同一フォーマット） | WebRTC/Opus/LiveKit |
+| ポート | 8000（固定） | 起動時に指定（デフォルト8000） | LiveKit設定に依存 |
+| ドリフト補正 | なし（ジッターバッファのみ） | **アダプティブSRC（rubato）** | SRC 48kHz固定送信 |
 
 ---
 
