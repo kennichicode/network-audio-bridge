@@ -151,7 +151,7 @@ REAPER Master -> NAB Tap plugin -> ~/Library/Caches/KenichiNAB/nab-tap.sock -> n
 - プラグイン内ではOpus変換やLiveKit接続をしません。
 - Opus変換、SRC、LiveKit送信、再接続、表示は `nab-live` 側で行います。
 - 96kHzのREAPERセッションも想定し、`nab-live` 内で48kHz stereoへ変換します。
-- LiveKit Rust SDKで公開されている音声保護設定として、bitrate / RED / DTX / queueをCLIから設定できます。Opus FECそのものは現SDKの公開オプションではありません。
+- LiveKit Rust SDKで公開されている音声保護設定として、bitrate / RED / DTX / queueをCLIから設定できます。Opus FECそのものは現SDKの公開オプションではありませんが、SDK側のWebRTC/Opus SDPでは `useinbandfec=1` と `stereo=1` が入る経路を使います。
 - 通常はデスクトップの `NAB Live Sender.command` を使います。設定を選びたい時だけ `NAB Live Wizard.command` を使います。
 
 起動:
@@ -176,8 +176,8 @@ nab-live --source plugin --enable-dtx
 
 | profile | bitrate | RED | DTX | LiveKit queue | 用途 |
 |---------|---------|-----|-----|---------------|------|
-| stable-music | 160 kbps | on | off | 1200 ms | 標準。まず切れにくさ優先 |
-| hi-fi-music | 256 kbps | on | off | 1000 ms | 安定回線で音質優先 |
+| stable-music | 256 kbps | on | off | 1200 ms | 標準。StageDAWの良かった音質に寄せた音楽用 |
+| hi-fi-music | 320 kbps | on | off | 1000 ms | 安定回線でさらに音質優先 |
 | speech | 64 kbps | on | on | 800 ms | 会話・確認用 |
 | low-bandwidth | 96 kbps | on | off | 1500 ms | 厳しい回線で音楽を切らさない方向 |
 | max-quality-lab | 510 kbps | off | off | 1000 ms | 実験用。通常運用では使わない |

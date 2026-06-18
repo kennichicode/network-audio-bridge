@@ -77,7 +77,7 @@ age = max(0.0, time.time() - (data.get("updated_at_unix_ms", 0) / 1000))
 print(f"State    : {data.get('connection')}  (updated {age:.1f}s ago)")
 print(f"Source   : {data.get('source')}")
 print(f"Room     : {data.get('room')}")
-print(f"Profile  : {data.get('profile')} / {int(data.get('bitrate_bps', 0) / 1000)} kbps / RED={data.get('red_enabled')} / DTX={data.get('dtx_enabled')}")
+print(f"Profile  : {data.get('profile')} / {int(data.get('bitrate_bps', 0) / 1000)} kbps / RED={data.get('red_enabled')} / FEC={data.get('opus_fec_mode', 'auto')} / DTX={data.get('dtx_enabled')}")
 print(f"Frames   : captured={data.get('captured_frames')} sent={data.get('sent_frames')} tapPackets={data.get('tap_packets')}")
 print(f"VST3     : {data.get('vst3_connected', 'unknown')}  dropped={data.get('frames_dropped_total', 0)}")
 print(f"RTP      : packets={data.get('rtp_packets_sent', 0)} bytes={data.get('rtp_bytes_sent', 0)} statsErr={data.get('rtp_stats_errors', 0)}")
@@ -192,7 +192,7 @@ fi
 
 echo "Starting one NAB Live Sender..."
 echo "Profile: $PROFILE"
-echo "Default: stable-music = 160 kbps / RED on / DTX off"
+echo "Default: stable-music = 256 kbps / RED on / Opus FEC auto / DTX off"
 echo "Socket : $SOCKET"
 echo "Status : $STATUS_FILE"
 echo ""

@@ -200,6 +200,18 @@
         padding: 0 18px;
       }
 
+      select {
+        min-height: 48px;
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: #262626;
+        color: var(--text);
+        font: inherit;
+        font-size: 18px;
+        padding: 0 18px;
+      }
+
       button {
         min-height: 48px;
         border: 0;
@@ -360,6 +372,21 @@
         text-align: center;
       }
 
+      .output-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        align-items: center;
+        margin: 14px 0 18px;
+      }
+
+      .output-help {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
       .meters {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -477,6 +504,10 @@
           grid-template-columns: 1fr;
         }
 
+        .output-row {
+          grid-template-columns: 1fr;
+        }
+
         .meters {
           grid-template-columns: 1fr;
         }
@@ -508,7 +539,7 @@
         <div class="two-col">
           <div>
             <div class="setting-label">レイテンシー: 低遅延</div>
-            <div class="setting-value">品質: OPUS / 160 kbit/s / RED</div>
+            <div class="setting-value">品質: OPUS / 256 kbit/s / RED / FEC auto</div>
           </div>
           <div>
             <div class="setting-label good">受信専用トークン</div>
@@ -543,6 +574,13 @@
             <button id="gainPlus" type="button" aria-label="monitor gain up">+</button>
           </div>
         </div>
+        <div class="output-row">
+          <select id="outputDevice" aria-label="audio output device">
+            <option value="default">出力: Chrome/OSデフォルト</option>
+          </select>
+          <button id="refreshOutputs" class="secondary" type="button">出力更新</button>
+        </div>
+        <small id="outputHelp" class="output-help">Chromeでは出力デバイスをここで選べます。iPhone/SafariはOS側の出力を使います。</small>
         <div class="db-scale" aria-hidden="true">
           <span>-72</span>
           <span>-60</span>
@@ -646,6 +684,9 @@
       const gainMinusButton = document.getElementById("gainMinus");
       const gainPlusButton = document.getElementById("gainPlus");
       const monitorGainEl = document.getElementById("monitorGain");
+      const outputDeviceSelect = document.getElementById("outputDevice");
+      const refreshOutputsButton = document.getElementById("refreshOutputs");
+      const outputHelpEl = document.getElementById("outputHelp");
 
       let room;
       let audioNode;
@@ -656,6 +697,8 @@
       let meterSource;
       let meterSplitter;
       let meterGain;
+      let meterDestination;
+      let monitorOutputElement;
       let leftAnalyser;
       let rightAnalyser;
       let leftSamples;
@@ -665,10 +708,22 @@
       let listenerIdentity;
       let listenerProofKey;
       let lastProofSentAt = 0;
+      let lastProofUiAt = 0;
       let lastProofText = "";
       let monitorGainDb = 18;
       let lastAnalyserRmsDb = -Infinity;
       let lastStatsLevelDb = -Infinity;
+      let lastMeterStatsAt = 0;
+      let graphPlaybackActive = false;
+      let selectedSinkId = "default";
+      let currentStatusKey = "";
+      let currentStatusKind = "";
+      let currentProofText = "";
+      let currentProofDetail = "";
+      let currentProofKind = "";
+      let lastReceiveAt = 0;
+      let lastAudibleAt = 0;
+      let lastPlayerReadyAt = 0;
 
       const STATUS_COPY = {
         locked: ["未接続", "合言葉待ち。まだ音声受信は始まっていません。"],
@@ -678,6 +733,7 @@
         "audio playing": ["受信中", "ブラウザで音声が再生されています。"],
         "low signal": ["受信中 / 信号が低い", "音声パケットは来ていますが、レベルが低すぎます。モニターGainを上げてください。"],
         "audio blocked": ["音声許可待ち", "音声パケットは来ています。ブラウザの再生許可が必要です。"],
+        "audio unlocked": ["音声許可済み", "音声は許可されました。音声トラックを待っています。"],
         "tap Unlock Audio": ["音声許可待ち", "音声許可ボタンを押すと再生を開始します。"],
         "no audio frames": ["音声パケット停止", "接続済みですが、受信パケットが増えていません。"],
         reconnecting: ["再接続中", "LiveKitへ再接続しています。"],
@@ -700,6 +756,16 @@
 
       function setStatus(text, kind = "") {
         const copy = STATUS_COPY[text] || [text, ""];
+        if (
+          currentStatusKey === text &&
+          currentStatusKind === kind &&
+          statusText.textContent === copy[0] &&
+          mainDetailEl.textContent === (copy[1] || "")
+        ) {
+          return;
+        }
+        currentStatusKey = text;
+        currentStatusKind = kind;
         statusEl.className = `pill ${kind}`;
         statusText.textContent = copy[0];
         mainStateEl.textContent = copy[0];
@@ -707,6 +773,21 @@
       }
 
       function setProof(text, detail, kind = "") {
+        const now = Date.now();
+        if (
+          currentProofText === text &&
+          currentProofKind === kind &&
+          currentProofDetail === detail
+        ) {
+          return;
+        }
+        if (currentProofText === text && currentProofKind === kind && now - lastProofUiAt < 5000) {
+          return;
+        }
+        lastProofUiAt = now;
+        currentProofText = text;
+        currentProofDetail = detail;
+        currentProofKind = kind;
         proofEl.textContent = text;
         proofEl.className = kind;
         proofDetailEl.textContent = detail;
@@ -737,6 +818,9 @@
         audioNode = undefined;
         currentAudioTrack = undefined;
         playBlocked = false;
+        lastReceiveAt = 0;
+        lastAudibleAt = 0;
+        lastPlayerReadyAt = 0;
         setProof("音声待ち", "LiveKitの音声トラック待ち", "state-warn");
         publisherEl.textContent = "未検出";
         trackEl.textContent = "未検出";
@@ -802,6 +886,16 @@
           playerEl.textContent = "未作成";
           return;
         }
+        if (
+          graphPlaybackActive &&
+          audioContext?.state === "running" &&
+          audioNode &&
+          !audioNode.paused &&
+          !audioNode.muted
+        ) {
+          playerEl.textContent = `再生中 / Gain ${monitorGainEl.textContent}`;
+          return;
+        }
         if (audioNode.paused) {
           playerEl.textContent = "停止中";
         } else {
@@ -828,6 +922,7 @@
         peakDbEl.textContent = "-inf dB";
         lastAnalyserRmsDb = -Infinity;
         lastStatsLevelDb = -Infinity;
+        lastMeterStatsAt = 0;
       }
 
       function stopLevelMeter() {
@@ -842,9 +937,17 @@
             // Disconnect can throw if the node is already detached.
           }
         }
+        if (monitorOutputElement) {
+          monitorOutputElement.pause();
+          monitorOutputElement.srcObject = null;
+          monitorOutputElement.remove();
+        }
         meterSource = undefined;
         meterSplitter = undefined;
         meterGain = undefined;
+        meterDestination = undefined;
+        monitorOutputElement = undefined;
+        graphPlaybackActive = false;
         leftAnalyser = undefined;
         rightAnalyser = undefined;
         leftSamples = undefined;
@@ -886,6 +989,15 @@
         return `${((clamped + 72) / 84) * 100}%`;
       }
 
+      function renderMeterLevel(leftDb, rightDb = leftDb, peakDb = Math.max(leftDb, rightDb)) {
+        leftMeterEl.style.width = meterWidth(leftDb);
+        rightMeterEl.style.width = meterWidth(rightDb);
+        leftDbEl.textContent = formatDb(leftDb);
+        rightDbEl.textContent = formatDb(rightDb);
+        peakDbEl.textContent = formatDb(peakDb, true);
+        levelEl.textContent = formatDb(Math.max(leftDb, rightDb), true);
+      }
+
       function updateLevelMeter() {
         if (!leftAnalyser || !rightAnalyser || !leftSamples || !rightSamples) return;
         leftAnalyser.getFloatTimeDomainData(leftSamples);
@@ -895,23 +1007,18 @@
         const loudestRms = Math.max(left.rmsDb, right.rmsDb);
         const loudestPeak = Math.max(left.peakDb, right.peakDb);
         lastAnalyserRmsDb = loudestRms;
-        leftMeterEl.style.width = meterWidth(left.rmsDb);
-        rightMeterEl.style.width = meterWidth(right.rmsDb);
-        leftDbEl.textContent = formatDb(left.rmsDb);
-        rightDbEl.textContent = formatDb(right.rmsDb);
-        peakDbEl.textContent = `${formatDb(loudestPeak, true)}`;
-        levelEl.textContent = formatDb(loudestRms, true);
+        if (Number.isFinite(loudestRms) && loudestRms > -72) {
+          renderMeterLevel(left.rmsDb, right.rmsDb, loudestPeak);
+        } else if (Date.now() - lastMeterStatsAt > 2500) {
+          renderMeterLevel(-Infinity);
+        }
       }
 
       function renderStatsLevel(audioLevelDb) {
         if (!Number.isFinite(audioLevelDb)) return;
         if (Number.isFinite(lastAnalyserRmsDb) && lastAnalyserRmsDb > -72) return;
-        leftMeterEl.style.width = meterWidth(audioLevelDb);
-        rightMeterEl.style.width = meterWidth(audioLevelDb);
-        leftDbEl.textContent = formatDb(audioLevelDb);
-        rightDbEl.textContent = formatDb(audioLevelDb);
-        peakDbEl.textContent = formatDb(audioLevelDb, true);
-        levelEl.textContent = formatDb(audioLevelDb, true);
+        lastMeterStatsAt = Date.now();
+        renderMeterLevel(audioLevelDb);
       }
 
       function updateMonitorGain() {
@@ -921,9 +1028,87 @@
           const gain = Math.pow(10, monitorGainDb / 20);
           meterGain.gain.setTargetAtTime(gain, audioContext.currentTime, 0.02);
         }
+        updatePlayerState();
       }
 
-      function startLevelMeter(element) {
+      async function applyOutputDevice(element = monitorOutputElement || audioNode) {
+        if (!element) return false;
+        if (typeof element.setSinkId !== "function") {
+          outputHelpEl.textContent = "このブラウザではページ内の出力デバイス選択に非対応です。OS/Chrome側の出力を選んでください。";
+          return false;
+        }
+        try {
+          await element.setSinkId(selectedSinkId || "default");
+          const label = outputDeviceSelect.selectedOptions[0]?.textContent || "Chrome/OSデフォルト";
+          outputHelpEl.textContent = `出力先: ${label}`;
+          return true;
+        } catch (err) {
+          outputHelpEl.textContent = `出力切替に失敗: ${err.message || String(err)}`;
+          log(`setSinkId failed: ${err.message || String(err)}`);
+          return false;
+        }
+      }
+
+      async function refreshOutputDevices() {
+        if (!navigator.mediaDevices?.enumerateDevices) {
+          outputHelpEl.textContent = "このブラウザでは出力デバイス一覧を取得できません。";
+          return;
+        }
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const outputs = devices.filter((device) => device.kind === "audiooutput");
+          const previous = selectedSinkId || outputDeviceSelect.value || "default";
+          outputDeviceSelect.replaceChildren();
+          const defaultOption = document.createElement("option");
+          defaultOption.value = "default";
+          defaultOption.textContent = "出力: Chrome/OSデフォルト";
+          outputDeviceSelect.append(defaultOption);
+          for (const device of outputs) {
+            if (!device.deviceId || device.deviceId === "default") continue;
+            const option = document.createElement("option");
+            option.value = device.deviceId;
+            option.textContent = device.label || `出力デバイス ${outputDeviceSelect.options.length}`;
+            outputDeviceSelect.append(option);
+          }
+          outputDeviceSelect.value = [...outputDeviceSelect.options].some((option) => option.value === previous)
+            ? previous
+            : "default";
+          selectedSinkId = outputDeviceSelect.value;
+          if (outputs.length <= 1) {
+            outputHelpEl.textContent = "出力候補はChrome/OSデフォルトのみです。ChromeやmacOSの出力設定も確認してください。";
+          } else {
+            outputHelpEl.textContent = "出力デバイスを選べます。音が出ない時はここでMacBookスピーカー/ヘッドホンを選んでください。";
+          }
+          await applyOutputDevice();
+        } catch (err) {
+          outputHelpEl.textContent = `出力一覧を取得できません: ${err.message || String(err)}`;
+          log(`enumerate audio outputs failed: ${err.message || String(err)}`);
+        }
+      }
+
+      async function chooseOutputDevice() {
+        try {
+          if (navigator.mediaDevices?.selectAudioOutput) {
+            const device = await navigator.mediaDevices.selectAudioOutput();
+            if (device?.deviceId) {
+              selectedSinkId = device.deviceId;
+              await refreshOutputDevices();
+              outputDeviceSelect.value = [...outputDeviceSelect.options].some((option) => option.value === selectedSinkId)
+                ? selectedSinkId
+                : "default";
+              selectedSinkId = outputDeviceSelect.value;
+              await applyOutputDevice();
+              return;
+            }
+          }
+          await refreshOutputDevices();
+        } catch (err) {
+          outputHelpEl.textContent = `出力選択をキャンセル/失敗: ${err.message || String(err)}`;
+          log(`audio output selection failed: ${err.message || String(err)}`);
+        }
+      }
+
+      function startLevelMeter(element, track) {
         stopLevelMeter();
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         if (!AudioContextClass) {
@@ -934,21 +1119,58 @@
           if (!audioContext) {
             audioContext = new AudioContextClass();
           }
-          meterSource = audioContext.createMediaElementSource(element);
+          const mediaTrack = track?.mediaStreamTrack;
+          if (mediaTrack && window.MediaStream) {
+            meterSource = audioContext.createMediaStreamSource(new MediaStream([mediaTrack]));
+            element.muted = true;
+          } else {
+            meterSource = audioContext.createMediaElementSource(element);
+            element.muted = true;
+          }
           meterSplitter = audioContext.createChannelSplitter(2);
           meterGain = audioContext.createGain();
+          meterDestination = audioContext.createMediaStreamDestination();
           leftAnalyser = audioContext.createAnalyser();
           rightAnalyser = audioContext.createAnalyser();
           leftAnalyser.fftSize = 2048;
           rightAnalyser.fftSize = 2048;
           leftSamples = new Float32Array(leftAnalyser.fftSize);
           rightSamples = new Float32Array(rightAnalyser.fftSize);
-          meterSource.connect(meterSplitter);
+          meterSource.connect(meterGain);
+          meterGain.connect(meterSplitter);
           meterSplitter.connect(leftAnalyser, 0);
           meterSplitter.connect(rightAnalyser, 1);
-          meterSource.connect(meterGain);
-          meterGain.connect(audioContext.destination);
+          meterGain.connect(meterDestination);
+          monitorOutputElement = document.createElement("audio");
+          monitorOutputElement.autoplay = true;
+          monitorOutputElement.playsInline = true;
+          monitorOutputElement.controls = true;
+          monitorOutputElement.srcObject = meterDestination.stream;
+          audioNode = monitorOutputElement;
+          audioEl.replaceChildren(monitorOutputElement);
+          graphPlaybackActive = true;
           updateMonitorGain();
+          applyOutputDevice(monitorOutputElement).catch(() => {});
+          monitorOutputElement.addEventListener("playing", () => {
+            playBlocked = false;
+            updatePlayerState();
+            setStatus("audio playing", "connected");
+          });
+          monitorOutputElement.addEventListener("pause", updatePlayerState);
+          monitorOutputElement.addEventListener("waiting", () => {
+            setProof("バッファ中", "ブラウザ音声がデータ待ちです。", "state-warn");
+            setStatus("audio waiting");
+          });
+          monitorOutputElement.addEventListener("stalled", () => {
+            setProof("再生停止", "ブラウザ音声が停止しました。", "state-bad");
+            setStatus("audio stalled");
+          });
+          monitorOutputElement.play().catch((err) => {
+            playBlocked = true;
+            updatePlayerState();
+            setStatus("tap Unlock Audio", "connected");
+            log(`monitor output blocked: ${err.message || String(err)}`);
+          });
           meterTimer = setInterval(updateLevelMeter, 80);
           updateLevelMeter();
         } catch (err) {
@@ -992,7 +1214,15 @@
           const packetsPerSecond = Math.max(0, Math.round(packetDelta / elapsedSeconds));
           const bytesPerSecond = Math.max(0, Math.round(byteDelta / elapsedSeconds));
           const receivingAudio = packetDelta > 0 || byteDelta > 0;
-          const playerReady = audioNode && !audioNode.paused && !audioNode.muted && !playBlocked;
+          const graphReady =
+            graphPlaybackActive &&
+            audioContext?.state === "running" &&
+            audioNode &&
+            !audioNode.paused &&
+            !audioNode.muted &&
+            !playBlocked;
+          const elementReady = audioNode && !audioNode.paused && !audioNode.muted && !playBlocked;
+          const playerReady = graphReady || elementReady;
           const audioLevelDb = dbFromLinear(audioLevel ?? 0);
           lastStatsLevelDb = audioLevelDb;
           const visibleLevelDb =
@@ -1000,6 +1230,13 @@
               ? lastAnalyserRmsDb
               : audioLevelDb;
           const hasLevel = Number.isFinite(visibleLevelDb) && visibleLevelDb > -72;
+          const nowMs = Date.now();
+          if (receivingAudio) lastReceiveAt = nowMs;
+          if (playerReady) lastPlayerReadyAt = nowMs;
+          if (hasLevel) lastAudibleAt = nowMs;
+          const receivingRecent = nowMs - lastReceiveAt < 3500;
+          const playerReadyRecent = nowMs - lastPlayerReadyAt < 3500;
+          const audibleRecent = nowMs - lastAudibleAt < 3500;
 
           packetsEl.textContent = String(packets);
           packetDeltaEl.textContent = `+${packetsPerSecond}/s`;
@@ -1012,16 +1249,16 @@
           renderStatsLevel(audioLevelDb);
           updatePlayerState();
 
-          if (receivingAudio && playerReady && hasLevel) {
+          if (receivingRecent && playerReadyRecent && audibleRecent) {
             setProof("音あり", `受信中 ${formatDb(visibleLevelDb, true)} / +${packetsPerSecond} pkt/s`, "state-good");
             setStatus("audio playing", "connected");
-          } else if (receivingAudio && playerReady) {
+          } else if (receivingRecent && playerReadyRecent) {
             setProof("信号低い/無音", `パケットは来ています。level=${formatDb(visibleLevelDb, true)}`, "state-warn");
             setStatus("low signal", "connected");
-          } else if (receivingAudio && playBlocked) {
+          } else if (receivingRecent && playBlocked) {
             setProof("音声許可待ち", "パケットは来ています。ブラウザ再生が止まっています。", "state-warn");
             setStatus("tap Unlock Audio", "connected");
-          } else if (receivingAudio) {
+          } else if (receivingRecent) {
             setProof("パケット到着", "音声パケットは来ています。再生開始を待っています。", "state-warn");
             setStatus("track subscribed", "connected");
           } else if (lastStats && room?.state === ConnectionState.Connected) {
@@ -1065,33 +1302,36 @@
         publisherEl.textContent = participant.identity || "不明";
         trackEl.textContent = track.sid || "audio";
         setProof("トラック接続", "パケット移動を確認しています。", "state-warn");
-        startLevelMeter(element);
+        startLevelMeter(element, track);
         startStats(track);
-        element.addEventListener("playing", () => {
+        const playbackElement = audioNode || element;
+        playbackElement.addEventListener("playing", () => {
           playBlocked = false;
           updatePlayerState();
           setStatus("audio playing", "connected");
         });
-        element.addEventListener("pause", updatePlayerState);
-        element.addEventListener("waiting", () => {
+        playbackElement.addEventListener("pause", updatePlayerState);
+        playbackElement.addEventListener("waiting", () => {
           setProof("バッファ中", "ブラウザ音声がデータ待ちです。", "state-warn");
           setStatus("audio waiting");
         });
-        element.addEventListener("stalled", () => {
+        playbackElement.addEventListener("stalled", () => {
           setProof("再生停止", "ブラウザ音声が停止しました。", "state-bad");
           setStatus("audio stalled");
         });
-        element.addEventListener("error", () => {
+        playbackElement.addEventListener("error", () => {
           setProof("音声エラー", "ブラウザ音声でエラーが出ました。", "state-bad");
           setStatus("audio error", "failed");
           log("audio element error");
         });
-        element.play().catch(() => {
-          playBlocked = true;
-          updatePlayerState();
-          setStatus("tap Unlock Audio", "connected");
-          log("audio is connected; tap Unlock Audio if iPhone blocks autoplay");
-        });
+        if (!graphPlaybackActive) {
+          playbackElement.play().catch(() => {
+            playBlocked = true;
+            updatePlayerState();
+            setStatus("tap Unlock Audio", "connected");
+            log("audio is connected; tap Unlock Audio if iPhone blocks autoplay");
+          });
+        }
       }
 
       async function getToken(passcode) {
@@ -1154,6 +1394,7 @@
         listenerIdentity = identity;
         listenerProofKey = proofKey;
         lastProofSentAt = 0;
+        lastProofUiAt = 0;
         lastProofText = "";
         setListenerMode(permissions);
         room = new Room({ adaptiveStream: false, dynacast: false });
@@ -1258,12 +1499,17 @@
       });
 
       unlockButton.addEventListener("click", async () => {
-        if (!audioNode) {
-          log("no audio track yet");
-          return;
-        }
         try {
           await unlockAudioGesture().catch(() => {});
+          if (!audioNode) {
+            playBlocked = false;
+            setProof("音声許可済み", "音声トラック待ち。送信が来たら自動で再生します。", "state-warn");
+            setStatus("audio unlocked", "connected");
+            log("browser audio unlocked; waiting for audio track");
+            return;
+          }
+          audioNode.muted = false;
+          audioNode.volume = 1;
           await audioNode.play();
           playBlocked = false;
           updatePlayerState();
@@ -1286,7 +1532,17 @@
         updateMonitorGain();
       });
 
+      outputDeviceSelect.addEventListener("change", async () => {
+        selectedSinkId = outputDeviceSelect.value || "default";
+        await applyOutputDevice();
+      });
+
+      refreshOutputsButton.addEventListener("click", async () => {
+        await chooseOutputDevice();
+      });
+
       updateMonitorGain();
+      refreshOutputDevices().catch(() => {});
     </script>
   </body>
 </html>

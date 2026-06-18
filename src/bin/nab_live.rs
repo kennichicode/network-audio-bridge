@@ -45,6 +45,7 @@ const OUT_RATE: u32 = 48_000;
 const OUT_CHANNELS: usize = 2;
 const OUT_FRAME_MS: u32 = 10;
 const OUT_FRAMES_PER_PACKET: usize = (OUT_RATE as usize * OUT_FRAME_MS as usize) / 1000;
+const MAX_INPUT_BLOCK_WAIT_MS: u64 = 30;
 
 const TAP_MAGIC: &[u8; 8] = b"NABTAP1\0";
 const TAP_VERSION: u32 = 1;
@@ -72,7 +73,7 @@ enum SourceArg {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum AudioProfileArg {
-    /// Stable music monitoring default.
+    /// Stable music monitoring default. StageDAW-compatible 256 kbps stereo.
     #[value(
         name = "stable-music",
         alias = "default-stable-music",
@@ -986,8 +987,8 @@ fn resolve_audio_send_config(args: &Args) -> AppResult<AudioSendConfig> {
 
 fn profile_defaults(profile: AudioProfileArg) -> (u64, bool, bool, u32) {
     match profile {
-        AudioProfileArg::StableMusic => (160_000, true, false, 1_200),
-        AudioProfileArg::HiFiMusic => (256_000, true, false, 1_000),
+        AudioProfileArg::StableMusic => (256_000, true, false, 1_200),
+        AudioProfileArg::HiFiMusic => (320_000, true, false, 1_000),
         AudioProfileArg::Speech => (64_000, true, true, 800),
         AudioProfileArg::LowBandwidth => (96_000, true, false, 1_500),
         AudioProfileArg::MaxQualityLab => (510_000, false, false, 1_000),
@@ -1845,20 +1846,43 @@ impl AudioPump {
         state: &State,
     ) -> AppResult<()> {
         let needed_samples = self.input_frames_per_chunk * OUT_CHANNELS;
+        if state.captured_frames.load(Ordering::Relaxed) == 0 {
+            state.ring_buffer_ms.store(0, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            return Ok(());
+        }
+
+        let wait_start = Instant::now();
+        while cons.len() < needed_samples
+            && wait_start.elapsed() < Duration::from_millis(MAX_INPUT_BLOCK_WAIT_MS)
+            && !termination_requested()
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+
         let buffered_samples = cons.len();
         let buffered_ms = (buffered_samples / OUT_CHANNELS) * 1000 / self.input_rate as usize;
         state.ring_buffer_ms.store(buffered_ms, Ordering::Relaxed);
 
-        if buffered_samples < needed_samples {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            return Ok(());
-        }
-
-        let popped = cons.pop_slice(&mut self.input_interleaved);
-        if popped != needed_samples {
+        self.input_interleaved.fill(0.0);
+        let available_samples = buffered_samples.min(needed_samples);
+        let popped = if available_samples > 0 {
+            cons.pop_slice(&mut self.input_interleaved[..available_samples])
+        } else {
+            0
+        };
+        if popped < needed_samples {
             state.underruns.fetch_add(1, Ordering::Relaxed);
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            return Ok(());
+            set_last_error(
+                state,
+                format!(
+                    "input underrun padded {} frames after waiting {} ms",
+                    (needed_samples - popped) / OUT_CHANNELS,
+                    wait_start.elapsed().as_millis()
+                ),
+            );
+        } else if last_error_snapshot(state).starts_with("input underrun padded ") {
+            clear_last_error(state);
         }
 
         let output_frames = if let Some(resampler) = self.resampler.as_mut() {
@@ -2132,7 +2156,7 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
 
     f.render_widget(
         Paragraph::new(format!(
-            " Input : {}\n Output: 48 kHz stereo Opus/WebRTC\n Profile: {}  bitrate={} kbps  RED={}  DTX={}  queue={} ms",
+            " Input : {}\n Output: 48 kHz stereo Opus/WebRTC\n Profile: {}  bitrate={} kbps  RED={}  FEC=auto  DTX={}  queue={} ms",
             runtime.source_label,
             profile_label(runtime.audio_profile),
             runtime.bitrate / 1000,
@@ -2470,6 +2494,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
             "  \"profile\": {profile},\n",
             "  \"bitrate_bps\": {bitrate},\n",
             "  \"red_enabled\": {red},\n",
+            "  \"opus_fec_mode\": \"webrtc-opus-auto\",\n",
             "  \"dtx_enabled\": {dtx},\n",
             "  \"livekit_queue_ms\": {queue},\n",
             "  \"buffer_ms\": {buffer_ms},\n",
