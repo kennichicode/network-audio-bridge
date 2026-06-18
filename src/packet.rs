@@ -47,12 +47,22 @@ pub fn parse_header(buf: &[u8], expected_sr: u32, expected_ch: u8) -> Result<Hea
     }
     let channels = buf[5];
     if channels != expected_ch {
-        return Err(ParseError::ChannelsMismatch { got: channels, expected: expected_ch });
+        return Err(ParseError::ChannelsMismatch {
+            got: channels,
+            expected: expected_ch,
+        });
     }
     let sample_rate = LittleEndian::read_u32(&buf[6..10]);
     if sample_rate != expected_sr {
-        return Err(ParseError::SampleRateMismatch { got: sample_rate, expected: expected_sr });
+        return Err(ParseError::SampleRateMismatch {
+            got: sample_rate,
+            expected: expected_sr,
+        });
     }
     let seq = LittleEndian::read_u32(&buf[12..16]);
-    Ok(Header { channels, sample_rate, seq })
+    Ok(Header {
+        channels,
+        sample_rate,
+        seq,
+    })
 }

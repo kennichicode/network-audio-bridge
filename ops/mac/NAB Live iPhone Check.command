@@ -5,7 +5,6 @@ path=(/usr/bin /bin /usr/sbin /sbin /opt/homebrew/bin $path)
 hash -r
 
 BIN="$HOME/NetworkAudioBridge/nab-live"
-TEST_TONE="$HOME/Desktop/NAB Live Test Tone.command"
 STATUS_CMD="$HOME/Desktop/NAB Live Status.command"
 HEALTH_URL="https://livekit.kenichi-kawabata.com/healthz"
 LISTEN_URL="https://livekit.kenichi-kawabata.com/"
@@ -14,42 +13,13 @@ SOCKET="$HOME/Library/Caches/KenichiNAB/nab-tap.sock"
 TARGET_DEVICE="${NAB_PROOF_DEVICE:-iPhone}"
 TIMEOUT_SECONDS="${NAB_PROOF_TIMEOUT_SECONDS:-300}"
 MAX_PROOF_AGE_SECONDS="${NAB_PROOF_MAX_AGE_SECONDS:-30}"
-STARTED_TEST_TONE=0
 
 sender_pids() {
   pgrep -f "$BIN" 2>/dev/null || true
 }
 
-stop_started_test_tone() {
-  if (( STARTED_TEST_TONE != 1 )); then
-    return
-  fi
-
-  local pids_text
-  local pids
-  pids_text="$(sender_pids)"
-  if [[ -n "$pids_text" ]]; then
-    pids=("${(@f)pids_text}")
-    echo ""
-    echo "Stopping the test tone started by this check: ${pids[*]}"
-    kill "${pids[@]}" 2>/dev/null || true
-    sleep 1
-  fi
-
-  pids_text="$(sender_pids)"
-  if [[ -n "$pids_text" ]]; then
-    pids=("${(@f)pids_text}")
-    echo "Force stopping leftover test tone: ${pids[*]}"
-    kill -9 "${pids[@]}" 2>/dev/null || true
-    sleep 1
-  fi
-
-  rm -f "$SOCKET" "$SOCKET.lock" "$RUNTIME_LOCK"
-}
-
 finish() {
   local exit_status="${1:-0}"
-  stop_started_test_tone
   read -r "reply?Press Enter to close." || true
   exit "$exit_status"
 }
@@ -90,7 +60,7 @@ loss = proof.get("loss", "unknown")
 print(f"device={device} proof={state} player={player} age={age}s packets={packets} level={level} loss={loss}")
 print(f"track={track}")
 
-if device == target_device and state == "Audio OK" and age <= max_age:
+if device == target_device and state in ("音あり", "Audio OK") and age <= max_age:
     sys.exit(0)
 sys.exit(1)
 PY
@@ -104,7 +74,7 @@ echo "Listen page:"
 echo "  $LISTEN_URL"
 echo ""
 echo "Target proof:"
-echo "  $TARGET_DEVICE / Audio OK"
+echo "  $TARGET_DEVICE / 音あり"
 echo ""
 
 if [[ ! -x "$BIN" ]]; then
@@ -114,19 +84,12 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
-if [[ ! -x "$TEST_TONE" ]]; then
-  echo "Missing test tone command:"
-  echo "  $TEST_TONE"
-  read -r "reply?Press Enter to close." || true
-  exit 1
-fi
-
 if [[ -z "$(sender_pids)" ]]; then
   echo "No NAB Live sender is running."
-  echo "Starting test tone so the iPhone can listen now..."
-  NAB_TEST_TONE_SECONDS="$(( TIMEOUT_SECONDS + 120 ))" nohup "$TEST_TONE" > "$HOME/.nab/iphone-check-test-tone.log" 2>&1 < /dev/null &
-  STARTED_TEST_TONE=1
-  sleep 8
+  echo ""
+  echo "For recording safety, this command will NOT start a test tone."
+  echo "Open NAB Live Sender.command and use the real REAPER/12Mic audio."
+  finish 2
 else
   echo "NAB Live sender is already running. Using the current sender."
 fi
@@ -138,7 +101,7 @@ echo "  2. Enter the passcode"
 echo "  3. Tap Listen"
 echo "  4. If needed, tap Unlock Audio"
 echo ""
-echo "Waiting for $TARGET_DEVICE / Audio OK proof..."
+echo "Waiting for $TARGET_DEVICE / 音あり proof..."
 echo ""
 
 deadline=$(( SECONDS + TIMEOUT_SECONDS ))
@@ -159,7 +122,7 @@ while (( SECONDS < deadline )); do
 done
 
 echo ""
-echo "TIMEOUT: Did not see $TARGET_DEVICE / Audio OK within ${TIMEOUT_SECONDS}s."
+echo "TIMEOUT: Did not see $TARGET_DEVICE / 音あり within ${TIMEOUT_SECONDS}s."
 echo ""
 echo "Open NAB Live Status.command and check ListenerProof."
 finish 2

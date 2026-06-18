@@ -3,17 +3,21 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Reaper Listen</title>
+    <title>NAB Live Listen</title>
     <style>
       :root {
         color-scheme: dark;
-        --bg: #0e1113;
-        --band: #161b1f;
-        --line: #303a40;
-        --text: #eef5f2;
-        --muted: #9eaaa7;
-        --accent: #4fd39a;
-        --warn: #e8b957;
+        --bg: #090909;
+        --panel: #181818;
+        --band: #303030;
+        --line: #3d3d3d;
+        --text: #f4f4f2;
+        --muted: #aaa7a5;
+        --quiet: #6d6866;
+        --accent: #2fc061;
+        --accent-2: #b7dc64;
+        --warn: #ffc23f;
+        --hot: #ff6f98;
         --bad: #f06f72;
       }
 
@@ -24,16 +28,28 @@
       body {
         margin: 0;
         min-height: 100vh;
-        background: var(--bg);
+        background-color: var(--bg);
+        background-image:
+          linear-gradient(110deg, rgba(255, 255, 255, 0.02), transparent 36%),
+          linear-gradient(75deg, transparent 62%, rgba(145, 34, 23, 0.42));
         color: var(--text);
         font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         letter-spacing: 0;
       }
 
       main {
-        width: min(760px, calc(100vw - 32px));
-        margin: 0 auto;
-        padding: 28px 0 40px;
+        width: min(840px, calc(100vw - 28px));
+        margin: 22px auto;
+        padding: 0;
+      }
+
+      .console {
+        min-height: calc(100vh - 44px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 36px;
+        background: var(--panel);
+        box-shadow: 0 26px 80px rgba(0, 0, 0, 0.42);
+        padding: clamp(24px, 5vw, 52px);
       }
 
       header {
@@ -41,13 +57,13 @@
         align-items: flex-start;
         justify-content: space-between;
         gap: 18px;
-        padding: 10px 0 22px;
+        padding: 0 0 28px;
       }
 
       h1 {
         margin: 0;
-        font-size: clamp(34px, 8vw, 68px);
-        line-height: 0.95;
+        font-size: clamp(28px, 6vw, 54px);
+        line-height: 1;
         font-weight: 800;
       }
 
@@ -85,9 +101,85 @@
         background: var(--bad);
       }
 
+      .now {
+        padding: 24px 0;
+      }
+
+      .now b {
+        display: block;
+        font-size: clamp(32px, 8vw, 64px);
+        line-height: 1;
+      }
+
+      .now small {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 15px;
+      }
+
       section {
         border-top: 1px solid var(--line);
         padding: 22px 0;
+      }
+
+      .session-pill {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 14px;
+        align-items: center;
+        min-height: 80px;
+        border-radius: 999px;
+        background: var(--band);
+        padding: 0 26px;
+        font-size: clamp(25px, 5vw, 34px);
+        font-weight: 900;
+      }
+
+      .session-pill span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .session-pill small {
+        color: var(--muted);
+        font-size: 15px;
+        font-weight: 800;
+      }
+
+      .two-col {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 22px;
+      }
+
+      .setting-title {
+        margin: 0 0 18px;
+        font-size: 24px;
+        font-weight: 900;
+      }
+
+      .setting-label {
+        color: var(--muted);
+        font-size: 18px;
+        font-weight: 800;
+      }
+
+      .setting-label.good {
+        color: #75c793;
+      }
+
+      .setting-value {
+        margin-top: 8px;
+        color: var(--quiet);
+        font-size: 18px;
+        font-weight: 700;
+      }
+
+      .setting-value.good {
+        color: #75c793;
       }
 
       .join {
@@ -100,21 +192,21 @@
         min-height: 48px;
         width: 100%;
         border: 1px solid var(--line);
-        border-radius: 6px;
-        background: #0b0e10;
+        border-radius: 999px;
+        background: #262626;
         color: var(--text);
         font: inherit;
         font-size: 18px;
-        padding: 0 13px;
+        padding: 0 18px;
       }
 
       button {
         min-height: 48px;
         border: 0;
-        border-radius: 6px;
+        border-radius: 999px;
         padding: 0 22px;
         background: var(--accent);
-        color: #07100c;
+        color: #06110a;
         font: inherit;
         font-weight: 800;
         cursor: pointer;
@@ -143,10 +235,151 @@
         margin-top: 16px;
       }
 
+      .level-panel {
+        padding: 28px 0;
+      }
+
+      .level-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 16px;
+        margin-bottom: 18px;
+      }
+
+      .level-head h2 {
+        margin: 0;
+        color: var(--accent);
+        font-size: 21px;
+        text-align: center;
+        flex: 1;
+      }
+
+      .level-readout {
+        color: var(--warn);
+        font-size: 20px;
+        font-weight: 900;
+        min-width: 130px;
+        text-align: right;
+      }
+
+      .db-scale {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        color: var(--text);
+        font-size: clamp(13px, 3vw, 21px);
+        font-weight: 800;
+        margin: 12px 58px 8px 44px;
+      }
+
+      .db-scale span:last-child {
+        color: var(--hot);
+      }
+
+      .channel-meter {
+        display: grid;
+        grid-template-columns: 28px 1fr 54px;
+        gap: 14px;
+        align-items: center;
+        min-height: 32px;
+        font-size: 18px;
+        font-weight: 800;
+      }
+
+      .meter-rail {
+        position: relative;
+        height: 22px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: #222;
+      }
+
+      .meter-fill {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 0%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--accent-2), var(--warn) 72%, var(--hot));
+        transition: width 80ms linear;
+      }
+
+      .zero-line {
+        position: absolute;
+        top: -2px;
+        bottom: -2px;
+        left: 85.7%;
+        width: 3px;
+        background: rgba(0, 0, 0, 0.58);
+      }
+
+      .meter-db {
+        text-align: right;
+      }
+
+      .client-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 24px;
+        margin-top: 26px;
+        color: var(--text);
+        font-size: 18px;
+        font-weight: 800;
+      }
+
+      .gain-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 16px;
+        margin: 18px 0 10px;
+        color: var(--text);
+        font-size: 18px;
+        font-weight: 800;
+      }
+
+      .gain-control {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .gain-control button {
+        width: 44px;
+        height: 40px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #2f2f2f;
+        color: var(--text);
+        font-size: 22px;
+        font-weight: 900;
+      }
+
+      .gain-control b {
+        min-width: 84px;
+        color: var(--warn);
+        text-align: center;
+      }
+
       .meters {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
         gap: 10px;
+      }
+
+      details {
+        border-top: 1px solid var(--line);
+        padding: 18px 0 0;
+      }
+
+      summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      details .meters {
+        border-top: 0;
+        padding-top: 18px;
       }
 
       .meter {
@@ -199,6 +432,7 @@
 
       @media (max-width: 620px) {
         header,
+        .two-col,
         .join {
           grid-template-columns: 1fr;
           flex-direction: column;
@@ -222,6 +456,27 @@
           width: 100%;
         }
 
+        .session-pill {
+          border-radius: 28px;
+          grid-template-columns: 1fr;
+          min-height: 0;
+          padding: 20px;
+        }
+
+        .db-scale {
+          margin-right: 54px;
+          margin-left: 42px;
+        }
+
+        .client-row {
+          grid-template-columns: 1fr;
+          gap: 10px;
+        }
+
+        .gain-row {
+          grid-template-columns: 1fr;
+        }
+
         .meters {
           grid-template-columns: 1fr;
         }
@@ -229,46 +484,120 @@
     </style>
   </head>
   <body>
-    <main>
+    <main class="console">
       <header>
         <div>
-          <h1>Reaper Listen</h1>
-          <div class="room">room: reaper-master / source: Mac mini</div>
+          <h1>NAB Live Listen</h1>
+          <div class="room">Secure browser monitor</div>
         </div>
         <div id="status" class="pill">
           <span class="dot"></span>
-          <span id="statusText">locked</span>
+          <span id="statusText">未接続</span>
         </div>
       </header>
 
       <section>
+        <div class="session-pill">
+          <span>REAPER Master</span>
+          <small>Mac mini</small>
+        </div>
+      </section>
+
+      <section>
+        <h2 class="setting-title">セッション設定</h2>
+        <div class="two-col">
+          <div>
+            <div class="setting-label">レイテンシー: 低遅延</div>
+            <div class="setting-value">品質: OPUS / 160 kbit/s / RED</div>
+          </div>
+          <div>
+            <div class="setting-label good">受信専用トークン</div>
+            <div class="setting-value">ブラウザでListenした後だけ接続</div>
+          </div>
+        </div>
+      </section>
+
+      <section>
         <form id="joinForm" class="join">
-          <input id="passcode" name="passcode" type="password" autocomplete="off" placeholder="合言葉" />
-          <button id="listen" type="submit">Listen</button>
+          <input id="passcode" name="passcode" type="password" autocomplete="off" placeholder="合言葉（数字）" />
+          <button id="listen" type="submit">Listen 開始</button>
         </form>
+      </section>
+
+      <section class="now">
+        <b id="mainState">未接続</b>
+        <small id="mainDetail">合言葉待ち。まだ音声受信は始まっていません。</small>
+      </section>
+
+      <section class="level-panel">
+        <div class="level-head">
+          <div class="setting-label">監視レベル:</div>
+          <h2>オーディオ出力</h2>
+          <div id="peakDb" class="level-readout">-inf dB</div>
+        </div>
+        <div class="gain-row">
+          <span>モニターGain</span>
+          <div class="gain-control">
+            <button id="gainMinus" type="button" aria-label="monitor gain down">−</button>
+            <b id="monitorGain">+18 dB</b>
+            <button id="gainPlus" type="button" aria-label="monitor gain up">+</button>
+          </div>
+        </div>
+        <div class="db-scale" aria-hidden="true">
+          <span>-72</span>
+          <span>-60</span>
+          <span>-48</span>
+          <span>-36</span>
+          <span>-24</span>
+          <span>-12</span>
+          <span>+12</span>
+        </div>
+        <div class="channel-meter">
+          <span>1</span>
+          <div class="meter-rail">
+            <div id="leftMeter" class="meter-fill"></div>
+            <div class="zero-line"></div>
+          </div>
+          <span id="leftDb" class="meter-db">-inf</span>
+        </div>
+        <div class="channel-meter">
+          <span>2</span>
+          <div class="meter-rail">
+            <div id="rightMeter" class="meter-fill"></div>
+            <div class="zero-line"></div>
+          </div>
+          <span id="rightDb" class="meter-db">-inf</span>
+        </div>
+        <div class="client-row">
+          <span id="clientCount">接続されたクライアント: 0</span>
+          <span id="channelText">ストリーミングチャンネル: 1-2</span>
+        </div>
       </section>
 
       <section>
         <div class="transport">
-          <button id="disconnect" class="secondary" type="button">Disconnect</button>
-          <button id="unlock" class="secondary" type="button">Unlock Audio</button>
+          <button id="disconnect" class="secondary" type="button">切断</button>
+          <button id="unlock" class="secondary" type="button">音声許可</button>
         </div>
         <div id="audio"></div>
       </section>
 
-      <section class="meters">
-        <div class="meter"><b id="proof">locked</b><span>listen proof</span><small id="proofDetail">Press Listen</small></div>
-        <div class="meter"><b id="listenerMode">locked</b><span>token mode</span><small id="listenerModeDetail">not connected</small></div>
-        <div class="meter"><b id="publisher">none</b><span>publisher</span></div>
-        <div class="meter"><b id="track">none</b><span>track</span></div>
-        <div class="meter"><b id="quality">unknown</b><span>connection</span></div>
-        <div class="meter"><b id="player">none</b><span>audio element</span></div>
-        <div class="meter"><b id="packets">0</b><span>packets received</span><small id="packetDelta">+0/s</small></div>
-        <div class="meter"><b id="bytes">0 B</b><span>bytes received</span><small id="byteDelta">+0 B/s</small></div>
-        <div class="meter"><b id="level">unknown</b><span>audio level</span></div>
-        <div class="meter"><b id="jitter">unknown</b><span>jitter</span></div>
-        <div class="meter"><b id="loss">unknown</b><span>packets lost</span></div>
-      </section>
+      <details>
+        <summary>詳細診断</summary>
+        <section class="meters">
+          <div class="meter"><b id="proof">未接続</b><span>受信確認</span><small id="proofDetail">Listen開始前</small></div>
+          <div class="meter"><b id="listenerMode">未接続</b><span>接続権限</span><small id="listenerModeDetail">合言葉待ち</small></div>
+          <div class="meter"><b id="publisher">未検出</b><span>送信元</span></div>
+          <div class="meter"><b id="track">未検出</b><span>音声トラック</span></div>
+          <div class="meter"><b id="quality">未接続</b><span>接続状態</span></div>
+          <div class="meter"><b id="player">未作成</b><span>ブラウザ再生</span></div>
+          <div class="meter"><b id="packets">0</b><span>受信パケット</span><small id="packetDelta">+0/s</small></div>
+          <div class="meter"><b id="bytes">0 B</b><span>受信データ</span><small id="byteDelta">+0 B/s</small></div>
+          <div class="meter"><b id="level">未検出</b><span>音量</span></div>
+          <div class="meter"><b id="jitter">未検出</b><span>揺れ</span></div>
+          <div class="meter"><b id="loss">未検出</b><span>欠落</span></div>
+        </section>
+      </details>
 
       <section>
         <pre id="log"></pre>
@@ -284,6 +613,8 @@
 
       const statusEl = document.getElementById("status");
       const statusText = document.getElementById("statusText");
+      const mainStateEl = document.getElementById("mainState");
+      const mainDetailEl = document.getElementById("mainDetail");
       const logEl = document.getElementById("log");
       const audioEl = document.getElementById("audio");
       const joinForm = document.getElementById("joinForm");
@@ -306,18 +637,61 @@
       const levelEl = document.getElementById("level");
       const jitterEl = document.getElementById("jitter");
       const lossEl = document.getElementById("loss");
+      const leftMeterEl = document.getElementById("leftMeter");
+      const rightMeterEl = document.getElementById("rightMeter");
+      const leftDbEl = document.getElementById("leftDb");
+      const rightDbEl = document.getElementById("rightDb");
+      const peakDbEl = document.getElementById("peakDb");
+      const clientCountEl = document.getElementById("clientCount");
+      const gainMinusButton = document.getElementById("gainMinus");
+      const gainPlusButton = document.getElementById("gainPlus");
+      const monitorGainEl = document.getElementById("monitorGain");
 
       let room;
       let audioNode;
       let audioContext;
       let currentAudioTrack;
       let statsTimer;
+      let meterTimer;
+      let meterSource;
+      let meterSplitter;
+      let meterGain;
+      let leftAnalyser;
+      let rightAnalyser;
+      let leftSamples;
+      let rightSamples;
       let lastStats;
       let playBlocked = false;
       let listenerIdentity;
       let listenerProofKey;
       let lastProofSentAt = 0;
       let lastProofText = "";
+      let monitorGainDb = 18;
+      let lastAnalyserRmsDb = -Infinity;
+      let lastStatsLevelDb = -Infinity;
+
+      const STATUS_COPY = {
+        locked: ["未接続", "合言葉待ち。まだ音声受信は始まっていません。"],
+        connecting: ["接続中", "LiveKitへ接続しています。"],
+        "waiting for audio": ["接続済み / 音声待ち", "接続はできています。Mac miniの音声トラックを待っています。"],
+        "track subscribed": ["音声トラック受信", "音声トラックに接続しました。パケット移動を確認しています。"],
+        "audio playing": ["受信中", "ブラウザで音声が再生されています。"],
+        "low signal": ["受信中 / 信号が低い", "音声パケットは来ていますが、レベルが低すぎます。モニターGainを上げてください。"],
+        "audio blocked": ["音声許可待ち", "音声パケットは来ています。ブラウザの再生許可が必要です。"],
+        "tap Unlock Audio": ["音声許可待ち", "音声許可ボタンを押すと再生を開始します。"],
+        "no audio frames": ["音声パケット停止", "接続済みですが、受信パケットが増えていません。"],
+        reconnecting: ["再接続中", "LiveKitへ再接続しています。"],
+        disconnected: ["切断済み", "ブラウザ側の接続を切りました。"],
+        failed: ["接続失敗", "合言葉または通信状態を確認してください。"],
+        "getting token": ["合言葉確認中", "Listen用の受信専用トークンを取得しています。"],
+        "livekit connecting": ["LiveKit接続中", "受信ルームへ参加しています。"],
+        "connect timeout": ["接続タイムアウト", "LiveKit接続が時間内に完了しませんでした。"],
+        "publisher offline": ["Mac mini送信なし", "送信元がLiveKitから消えました。"],
+        "audio waiting": ["バッファ中", "音声プレイヤーがデータ待ちです。"],
+        "audio stalled": ["再生停止", "ブラウザの音声プレイヤーが停止しました。"],
+        "audio error": ["音声エラー", "ブラウザの音声プレイヤーでエラーが出ました。"],
+        listening: ["受信中", "ブラウザで音声再生を開始しました。"],
+      };
 
       function log(message) {
         const time = new Date().toLocaleTimeString();
@@ -325,8 +699,11 @@
       }
 
       function setStatus(text, kind = "") {
+        const copy = STATUS_COPY[text] || [text, ""];
         statusEl.className = `pill ${kind}`;
-        statusText.textContent = text;
+        statusText.textContent = copy[0];
+        mainStateEl.textContent = copy[0];
+        mainDetailEl.textContent = copy[1] || "";
       }
 
       function setProof(text, detail, kind = "") {
@@ -339,37 +716,47 @@
         const canPublish = permissions?.canPublish === true;
         const canSubscribe = permissions?.canSubscribe !== false;
         if (!canPublish && canSubscribe) {
-          listenerModeEl.textContent = "subscribe-only";
+          listenerModeEl.textContent = "受信専用";
           listenerModeEl.className = "state-good";
-          listenerModeDetailEl.textContent = "canSubscribe=true / canPublish=false";
+          listenerModeDetailEl.textContent = "送信不可 / 受信可";
         } else if (canPublish) {
-          listenerModeEl.textContent = "publish enabled";
+          listenerModeEl.textContent = "送信可能";
           listenerModeEl.className = "state-bad";
           listenerModeDetailEl.textContent = "listener token can publish";
         } else {
-          listenerModeEl.textContent = "unknown";
+          listenerModeEl.textContent = "未確認";
           listenerModeEl.className = "state-warn";
-          listenerModeDetailEl.textContent = "token permission not confirmed";
+          listenerModeDetailEl.textContent = "権限未確認";
         }
       }
 
       function resetAudio() {
         stopStats();
+        stopLevelMeter();
         audioEl.replaceChildren();
         audioNode = undefined;
         currentAudioTrack = undefined;
         playBlocked = false;
-        setProof("no audio", "waiting for subscribed audio track", "state-warn");
-        publisherEl.textContent = "none";
-        trackEl.textContent = "none";
-        playerEl.textContent = "none";
+        setProof("音声待ち", "LiveKitの音声トラック待ち", "state-warn");
+        publisherEl.textContent = "未検出";
+        trackEl.textContent = "未検出";
+        playerEl.textContent = "未作成";
         packetsEl.textContent = "0";
         packetDeltaEl.textContent = "+0/s";
         bytesEl.textContent = "0 B";
         byteDeltaEl.textContent = "+0 B/s";
-        levelEl.textContent = "unknown";
-        jitterEl.textContent = "unknown";
-        lossEl.textContent = "unknown";
+        levelEl.textContent = "未検出";
+        jitterEl.textContent = "未検出";
+        lossEl.textContent = "未検出";
+        resetLevelMeter();
+      }
+
+      function updateClientCount() {
+        if (!room || room.state !== ConnectionState.Connected) {
+          clientCountEl.textContent = "接続されたクライアント: 0";
+          return;
+        }
+        clientCountEl.textContent = `接続されたクライアント: ${room.remoteParticipants.size + 1}`;
       }
 
       function sendListenProof(metrics = {}) {
@@ -412,12 +799,14 @@
 
       function updatePlayerState() {
         if (!audioNode) {
-          playerEl.textContent = "none";
+          playerEl.textContent = "未作成";
           return;
         }
-        const state = audioNode.paused ? "paused" : "playing";
-        const mute = audioNode.muted ? "muted" : "unmuted";
-        playerEl.textContent = `${state} / ${mute}`;
+        if (audioNode.paused) {
+          playerEl.textContent = "停止中";
+        } else {
+          playerEl.textContent = audioNode.muted ? "再生中 / ミュート" : "再生中 / 音あり";
+        }
         if (playBlocked) {
           setStatus("audio blocked", "connected");
         }
@@ -429,6 +818,143 @@
           statsTimer = undefined;
         }
         lastStats = undefined;
+      }
+
+      function resetLevelMeter() {
+        leftMeterEl.style.width = "0%";
+        rightMeterEl.style.width = "0%";
+        leftDbEl.textContent = "-inf";
+        rightDbEl.textContent = "-inf";
+        peakDbEl.textContent = "-inf dB";
+        lastAnalyserRmsDb = -Infinity;
+        lastStatsLevelDb = -Infinity;
+      }
+
+      function stopLevelMeter() {
+        if (meterTimer) {
+          clearInterval(meterTimer);
+          meterTimer = undefined;
+        }
+        for (const node of [meterSource, meterSplitter, meterGain, leftAnalyser, rightAnalyser]) {
+          try {
+            node?.disconnect?.();
+          } catch (_) {
+            // Disconnect can throw if the node is already detached.
+          }
+        }
+        meterSource = undefined;
+        meterSplitter = undefined;
+        meterGain = undefined;
+        leftAnalyser = undefined;
+        rightAnalyser = undefined;
+        leftSamples = undefined;
+        rightSamples = undefined;
+        resetLevelMeter();
+      }
+
+      function dbFromLinear(value) {
+        if (!Number.isFinite(value) || value <= 0.0000001) return -Infinity;
+        return 20 * Math.log10(value);
+      }
+
+      function analyzeSamples(samples) {
+        let sum = 0;
+        let peak = 0;
+        for (const sample of samples) {
+          const abs = Math.abs(sample);
+          sum += sample * sample;
+          if (abs > peak) peak = abs;
+        }
+        const rms = Math.sqrt(sum / Math.max(1, samples.length));
+        return {
+          rmsDb: dbFromLinear(rms),
+          peakDb: dbFromLinear(peak),
+        };
+      }
+
+      function formatDb(value, unit = false) {
+        if (!Number.isFinite(value) || value < -72) {
+          return unit ? "-inf dB" : "-inf";
+        }
+        const text = value >= 0 ? `+${value.toFixed(1)}` : value.toFixed(1);
+        return unit ? `${text} dB` : text;
+      }
+
+      function meterWidth(value) {
+        if (!Number.isFinite(value) || value <= -72) return "0%";
+        const clamped = Math.max(-72, Math.min(12, value));
+        return `${((clamped + 72) / 84) * 100}%`;
+      }
+
+      function updateLevelMeter() {
+        if (!leftAnalyser || !rightAnalyser || !leftSamples || !rightSamples) return;
+        leftAnalyser.getFloatTimeDomainData(leftSamples);
+        rightAnalyser.getFloatTimeDomainData(rightSamples);
+        const left = analyzeSamples(leftSamples);
+        const right = analyzeSamples(rightSamples);
+        const loudestRms = Math.max(left.rmsDb, right.rmsDb);
+        const loudestPeak = Math.max(left.peakDb, right.peakDb);
+        lastAnalyserRmsDb = loudestRms;
+        leftMeterEl.style.width = meterWidth(left.rmsDb);
+        rightMeterEl.style.width = meterWidth(right.rmsDb);
+        leftDbEl.textContent = formatDb(left.rmsDb);
+        rightDbEl.textContent = formatDb(right.rmsDb);
+        peakDbEl.textContent = `${formatDb(loudestPeak, true)}`;
+        levelEl.textContent = formatDb(loudestRms, true);
+      }
+
+      function renderStatsLevel(audioLevelDb) {
+        if (!Number.isFinite(audioLevelDb)) return;
+        if (Number.isFinite(lastAnalyserRmsDb) && lastAnalyserRmsDb > -72) return;
+        leftMeterEl.style.width = meterWidth(audioLevelDb);
+        rightMeterEl.style.width = meterWidth(audioLevelDb);
+        leftDbEl.textContent = formatDb(audioLevelDb);
+        rightDbEl.textContent = formatDb(audioLevelDb);
+        peakDbEl.textContent = formatDb(audioLevelDb, true);
+        levelEl.textContent = formatDb(audioLevelDb, true);
+      }
+
+      function updateMonitorGain() {
+        monitorGainDb = Math.max(0, Math.min(36, monitorGainDb));
+        monitorGainEl.textContent = monitorGainDb === 0 ? "0 dB" : `+${monitorGainDb} dB`;
+        if (meterGain && audioContext) {
+          const gain = Math.pow(10, monitorGainDb / 20);
+          meterGain.gain.setTargetAtTime(gain, audioContext.currentTime, 0.02);
+        }
+      }
+
+      function startLevelMeter(element) {
+        stopLevelMeter();
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) {
+          log("audio level meter is not available in this browser");
+          return;
+        }
+        try {
+          if (!audioContext) {
+            audioContext = new AudioContextClass();
+          }
+          meterSource = audioContext.createMediaElementSource(element);
+          meterSplitter = audioContext.createChannelSplitter(2);
+          meterGain = audioContext.createGain();
+          leftAnalyser = audioContext.createAnalyser();
+          rightAnalyser = audioContext.createAnalyser();
+          leftAnalyser.fftSize = 2048;
+          rightAnalyser.fftSize = 2048;
+          leftSamples = new Float32Array(leftAnalyser.fftSize);
+          rightSamples = new Float32Array(rightAnalyser.fftSize);
+          meterSource.connect(meterSplitter);
+          meterSplitter.connect(leftAnalyser, 0);
+          meterSplitter.connect(rightAnalyser, 1);
+          meterSource.connect(meterGain);
+          meterGain.connect(audioContext.destination);
+          updateMonitorGain();
+          meterTimer = setInterval(updateLevelMeter, 80);
+          updateLevelMeter();
+        } catch (err) {
+          log(`level meter unavailable: ${err.message || String(err)}`);
+          resetLevelMeter();
+        }
       }
 
       function pickInboundAudioStats(report) {
@@ -467,31 +993,39 @@
           const bytesPerSecond = Math.max(0, Math.round(byteDelta / elapsedSeconds));
           const receivingAudio = packetDelta > 0 || byteDelta > 0;
           const playerReady = audioNode && !audioNode.paused && !audioNode.muted && !playBlocked;
+          const audioLevelDb = dbFromLinear(audioLevel ?? 0);
+          lastStatsLevelDb = audioLevelDb;
+          const visibleLevelDb =
+            Number.isFinite(lastAnalyserRmsDb) && lastAnalyserRmsDb > -72
+              ? lastAnalyserRmsDb
+              : audioLevelDb;
+          const hasLevel = Number.isFinite(visibleLevelDb) && visibleLevelDb > -72;
 
           packetsEl.textContent = String(packets);
           packetDeltaEl.textContent = `+${packetsPerSecond}/s`;
           bytesEl.textContent = formatBytes(bytes);
           byteDeltaEl.textContent = `+${formatBytes(bytesPerSecond)}/s`;
-          lossEl.textContent = Number.isFinite(lost) ? String(lost) : "unknown";
+          lossEl.textContent = Number.isFinite(lost) ? String(lost) : "未検出";
           jitterEl.textContent = Number.isFinite(jitterSeconds)
             ? `${(jitterSeconds * 1000).toFixed(1)} ms`
-            : "unknown";
-          levelEl.textContent = Number.isFinite(audioLevel)
-            ? `${Math.round(audioLevel * 100)}%`
-            : "unknown";
+            : "未検出";
+          renderStatsLevel(audioLevelDb);
           updatePlayerState();
 
-          if (receivingAudio && playerReady) {
-            setProof("Audio OK", `receiving +${packetsPerSecond} pkt/s, +${formatBytes(bytesPerSecond)}/s`, "state-good");
+          if (receivingAudio && playerReady && hasLevel) {
+            setProof("音あり", `受信中 ${formatDb(visibleLevelDb, true)} / +${packetsPerSecond} pkt/s`, "state-good");
             setStatus("audio playing", "connected");
+          } else if (receivingAudio && playerReady) {
+            setProof("信号低い/無音", `パケットは来ています。level=${formatDb(visibleLevelDb, true)}`, "state-warn");
+            setStatus("low signal", "connected");
           } else if (receivingAudio && playBlocked) {
-            setProof("Unlock needed", "packets are arriving, but browser blocked playback", "state-warn");
+            setProof("音声許可待ち", "パケットは来ています。ブラウザ再生が止まっています。", "state-warn");
             setStatus("tap Unlock Audio", "connected");
           } else if (receivingAudio) {
-            setProof("Packets OK", "audio packets are arriving; player is not playing yet", "state-warn");
+            setProof("パケット到着", "音声パケットは来ています。再生開始を待っています。", "state-warn");
             setStatus("track subscribed", "connected");
           } else if (lastStats && room?.state === ConnectionState.Connected) {
-            setProof("No packets", "connected, but inbound audio counters did not move", "state-bad");
+            setProof("パケット停止", "接続済みですが受信カウンターが動いていません。", "state-bad");
             setStatus("no audio frames");
           }
 
@@ -528,9 +1062,10 @@
         element.playsInline = true;
         audioNode = element;
         audioEl.replaceChildren(element);
-        publisherEl.textContent = participant.identity || "unknown";
+        publisherEl.textContent = participant.identity || "不明";
         trackEl.textContent = track.sid || "audio";
-        setProof("track attached", "waiting for inbound packet movement", "state-warn");
+        setProof("トラック接続", "パケット移動を確認しています。", "state-warn");
+        startLevelMeter(element);
         startStats(track);
         element.addEventListener("playing", () => {
           playBlocked = false;
@@ -539,15 +1074,15 @@
         });
         element.addEventListener("pause", updatePlayerState);
         element.addEventListener("waiting", () => {
-          setProof("Waiting", "audio element is buffering", "state-warn");
+          setProof("バッファ中", "ブラウザ音声がデータ待ちです。", "state-warn");
           setStatus("audio waiting");
         });
         element.addEventListener("stalled", () => {
-          setProof("Stalled", "browser audio element stalled", "state-bad");
+          setProof("再生停止", "ブラウザ音声が停止しました。", "state-bad");
           setStatus("audio stalled");
         });
         element.addEventListener("error", () => {
-          setProof("Audio error", "browser audio element reported an error", "state-bad");
+          setProof("音声エラー", "ブラウザ音声でエラーが出ました。", "state-bad");
           setStatus("audio error", "failed");
           log("audio element error");
         });
@@ -560,16 +1095,24 @@
       }
 
       async function getToken(passcode) {
-        const response = await fetch("/token", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          cache: "no-store",
-          body: JSON.stringify({
-            room: "reaper-master",
-            identity: `listener-${Math.random().toString(16).slice(2, 8)}`,
-            passcode,
-          }),
-        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        let response;
+        try {
+          response = await fetch("/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            cache: "no-store",
+            signal: controller.signal,
+            body: JSON.stringify({
+              room: "reaper-master",
+              identity: `listener-${Math.random().toString(16).slice(2, 8)}`,
+              passcode,
+            }),
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
         if (response.status === 401) {
           throw new Error("合言葉が違います");
         }
@@ -579,10 +1122,22 @@
         return response.json();
       }
 
+      function withTimeout(promise, timeoutMs, label) {
+        let timer;
+        const timeout = new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} timeout`)), timeoutMs);
+        });
+        return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+      }
+
+      async function connectRoom(url, token) {
+        await withTimeout(room.connect(url, token, { autoSubscribe: true }), 15000, "LiveKit connect");
+      }
+
       async function connect(passcode) {
         listenButton.disabled = true;
         setStatus("connecting");
-        qualityEl.textContent = "connecting";
+        qualityEl.textContent = "接続中";
         resetAudio();
 
         if (room) {
@@ -590,8 +1145,12 @@
           room = undefined;
         }
 
-        await unlockAudioGesture().catch(() => {});
+        log("prepare browser audio");
+        await withTimeout(unlockAudioGesture(), 1000, "Audio unlock").catch(() => {});
+        setStatus("getting token", "connected");
+        log("getting listen token");
         const { url, token, identity, expiresInSeconds, permissions, proofKey } = await getToken(passcode);
+        log("listen token received");
         listenerIdentity = identity;
         listenerProofKey = proofKey;
         lastProofSentAt = 0;
@@ -613,10 +1172,12 @@
 
         room.on(RoomEvent.ParticipantConnected, (participant) => {
           log(`participant ${participant.identity} joined`);
+          updateClientCount();
         });
 
         room.on(RoomEvent.ParticipantDisconnected, (participant) => {
           log(`participant ${participant.identity} left`);
+          updateClientCount();
           if (publisherEl.textContent === participant.identity) {
             resetAudio();
             setStatus("publisher offline");
@@ -629,9 +1190,14 @@
         });
 
         room.on(RoomEvent.ConnectionStateChanged, (state) => {
-          qualityEl.textContent = state;
+          qualityEl.textContent = state === ConnectionState.Connected
+            ? "接続済み"
+            : state === ConnectionState.Reconnecting
+              ? "再接続中"
+              : state;
           if (state === ConnectionState.Connected) {
             setStatus("waiting for audio", "connected");
+            updateClientCount();
           } else if (state === ConnectionState.Reconnecting) {
             setStatus("reconnecting");
           }
@@ -639,11 +1205,14 @@
 
         room.on(RoomEvent.Disconnected, (reason) => {
           setStatus("disconnected");
-          qualityEl.textContent = "disconnected";
+          qualityEl.textContent = "切断済み";
+          updateClientCount();
           log(`disconnected ${reason || ""}`.trim());
         });
 
-        await room.connect(url, token, { autoSubscribe: true });
+        setStatus("livekit connecting", "connected");
+        log(`connecting to ${url}`);
+        await connectRoom(url, token);
         const roomPermissions = room.localParticipant?.permissions || permissions;
         setListenerMode(roomPermissions);
         const canPublish = roomPermissions?.canPublish === true;
@@ -652,6 +1221,7 @@
         }
         log(`connected as ${identity}; token expires in ${expiresInSeconds || "unknown"}s; canPublish=${canPublish ? "true" : "false"}`);
         listenButton.disabled = false;
+        updateClientCount();
       }
 
       joinForm.addEventListener("submit", async (event) => {
@@ -660,9 +1230,14 @@
           await connect(passcodeInput.value);
         } catch (err) {
           listenButton.disabled = false;
-          setStatus("failed", "failed");
-          qualityEl.textContent = "failed";
-          log(err.message || String(err));
+          const message = err.message || String(err);
+          setStatus(message.includes("timeout") ? "connect timeout" : "failed", "failed");
+          qualityEl.textContent = "失敗";
+          log(message);
+          if (room) {
+            await room.disconnect().catch(() => {});
+            room = undefined;
+          }
         }
       });
 
@@ -673,12 +1248,13 @@
         }
         resetAudio();
         setStatus("locked");
-        qualityEl.textContent = "unknown";
-        listenerModeEl.textContent = "locked";
+        qualityEl.textContent = "未接続";
+        listenerModeEl.textContent = "未接続";
         listenerModeEl.className = "";
-        listenerModeDetailEl.textContent = "not connected";
+        listenerModeDetailEl.textContent = "合言葉待ち";
         listenerIdentity = undefined;
         listenerProofKey = undefined;
+        updateClientCount();
       });
 
       unlockButton.addEventListener("click", async () => {
@@ -691,7 +1267,7 @@
           await audioNode.play();
           playBlocked = false;
           updatePlayerState();
-          setProof("Playback unlocked", "waiting for inbound packet movement", "state-warn");
+          setProof("音声許可済み", "パケット移動を確認しています。", "state-warn");
           setStatus("listening", "connected");
         } catch (err) {
           playBlocked = true;
@@ -699,6 +1275,18 @@
           log(err.message || String(err));
         }
       });
+
+      gainMinusButton.addEventListener("click", () => {
+        monitorGainDb -= 6;
+        updateMonitorGain();
+      });
+
+      gainPlusButton.addEventListener("click", () => {
+        monitorGainDb += 6;
+        updateMonitorGain();
+      });
+
+      updateMonitorGain();
     </script>
   </body>
 </html>

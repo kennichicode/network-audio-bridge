@@ -35,7 +35,7 @@ mod netopts;
 #[path = "../packet.rs"]
 mod packet;
 
-use packet::{packet_bytes, parse_header, HEADER_BYTES, PACKET_SAMPLES, ParseError};
+use packet::{packet_bytes, parse_header, ParseError, HEADER_BYTES, PACKET_SAMPLES};
 
 const CH: usize = 2;
 const PACKET_BYTES: usize = packet_bytes(CH);
@@ -49,10 +49,10 @@ const P_GAIN_MAX: f64 = 1e-5;
 const MAX_RATIO_DEV: f64 = 0.005;
 
 const SAMPLE_RATES: &[(u32, &str)] = &[
-    (44100,  "44.1 kHz"),
-    (48000,  "48 kHz   (default)"),
-    (88200,  "88.2 kHz"),
-    (96000,  "96 kHz"),
+    (44100, "44.1 kHz"),
+    (48000, "48 kHz   (default)"),
+    (88200, "88.2 kHz"),
+    (96000, "96 kHz"),
     (176400, "176.4 kHz"),
     (192000, "192 kHz"),
 ];
@@ -151,7 +151,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let device = {
         let selected = config.output_device.as_deref().and_then(|name| {
-            host.output_devices().ok()?.find(|d| d.name().ok().as_deref() == Some(name))
+            host.output_devices()
+                .ok()?
+                .find(|d| d.name().ok().as_deref() == Some(name))
         });
         selected
             .or_else(|| host.default_output_device())
@@ -179,11 +181,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &cpal_cfg,
             move |data: &mut [f32], _| {
                 if state_cb.rebuffering.load(Ordering::Relaxed) {
-                    for s in data.iter_mut() { *s = 0.0; }
+                    for s in data.iter_mut() {
+                        *s = 0.0;
+                    }
                     return;
                 }
                 let n = play_cons.pop_slice(data);
-                for s in data[n..].iter_mut() { *s = 0.0; }
+                for s in data[n..].iter_mut() {
+                    *s = 0.0;
+                }
                 if n == 0 {
                     state_cb.rebuffering.store(true, Ordering::Relaxed);
                 }
@@ -229,10 +235,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(e) => {
                                 if last_mismatch_log.elapsed() > Duration::from_secs(5) {
                                     match e {
-                                        ParseError::BadMagic => log::log("rx: bad magic / alien packet"),
-                                        ParseError::UnsupportedVersion(v) => log::log(&format!("rx: unsupported version {}", v)),
-                                        ParseError::SampleRateMismatch { got, expected } => log::log(&format!("rx: sample rate mismatch got={} expected={}", got, expected)),
-                                        ParseError::ChannelsMismatch { got, expected } => log::log(&format!("rx: channels mismatch got={} expected={}", got, expected)),
+                                        ParseError::BadMagic => {
+                                            log::log("rx: bad magic / alien packet")
+                                        }
+                                        ParseError::UnsupportedVersion(v) => {
+                                            log::log(&format!("rx: unsupported version {}", v))
+                                        }
+                                        ParseError::SampleRateMismatch { got, expected } => {
+                                            log::log(&format!(
+                                                "rx: sample rate mismatch got={} expected={}",
+                                                got, expected
+                                            ))
+                                        }
+                                        ParseError::ChannelsMismatch { got, expected } => {
+                                            log::log(&format!(
+                                                "rx: channels mismatch got={} expected={}",
+                                                got, expected
+                                            ))
+                                        }
                                     }
                                     last_mismatch_log = Instant::now();
                                 }
@@ -242,12 +262,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let seq = header.seq;
                         if let Some(exp) = expected {
                             let diff = seq.wrapping_sub(exp);
-                            if diff >= u32::MAX / 2 { continue; }
+                            if diff >= u32::MAX / 2 {
+                                continue;
+                            }
                             if diff > 0 {
                                 let fill = diff.min(32) as usize * PACKET_SAMPLES * CH;
                                 let mut dropped = 0u64;
                                 for _ in 0..fill {
-                                    if prod.push(0.0f32).is_err() { dropped += 1; }
+                                    if prod.push(0.0f32).is_err() {
+                                        dropped += 1;
+                                    }
                                 }
                                 if dropped > 0 {
                                     state_udp.buf_overflow.fetch_add(dropped, Ordering::Relaxed);
@@ -258,8 +282,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         expected = Some(seq.wrapping_add(1));
                         let mut dropped = 0u64;
                         for i in 0..(PACKET_SAMPLES * CH) {
-                            let s = LittleEndian::read_f32(&pkt[HEADER_BYTES + i * 4..HEADER_BYTES + (i + 1) * 4]);
-                            if prod.push(s).is_err() { dropped += 1; }
+                            let s = LittleEndian::read_f32(
+                                &pkt[HEADER_BYTES + i * 4..HEADER_BYTES + (i + 1) * 4],
+                            );
+                            if prod.push(s).is_err() {
+                                dropped += 1;
+                            }
                         }
                         if dropped > 0 {
                             state_udp.buf_overflow.fetch_add(dropped, Ordering::Relaxed);
@@ -335,7 +363,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
-                let n_frames = match resampler.process_into_buffer(&waves_in, &mut waves_out, None) {
+                let n_frames = match resampler.process_into_buffer(&waves_in, &mut waves_out, None)
+                {
                     Ok((_, n)) => n,
                     Err(e) => {
                         log::log(&format!("SRC error: {}", e));
@@ -346,7 +375,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut dropped = 0u64;
                 for i in 0..n_frames {
                     for c in 0..CH {
-                        if pprod.push(waves_out[c][i]).is_err() { dropped += 1; }
+                        if pprod.push(waves_out[c][i]).is_err() {
+                            dropped += 1;
+                        }
                     }
                 }
                 if dropped > 0 {
@@ -376,7 +407,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Err(e) = resampler.set_resample_ratio(ratio, true) {
                         log::log(&format!("ratio update error: {}", e));
                     }
-                    state_src.ppm.store((adj * 1_000_000.0) as i64, Ordering::Relaxed);
+                    state_src
+                        .ppm
+                        .store((adj * 1_000_000.0) as i64, Ordering::Relaxed);
                 }
             }
         })
@@ -386,14 +419,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut quit_timer = Instant::now();
 
     loop {
-        let rebuf   = state.rebuffering.load(Ordering::Relaxed);
-        let raw_ms  = state.raw_ms.load(Ordering::Relaxed);
+        let rebuf = state.rebuffering.load(Ordering::Relaxed);
+        let raw_ms = state.raw_ms.load(Ordering::Relaxed);
         let play_ms = state.play_ms.load(Ordering::Relaxed);
-        let loss    = state.loss.load(Ordering::Relaxed);
+        let loss = state.loss.load(Ordering::Relaxed);
         let overflow = state.buf_overflow.load(Ordering::Relaxed);
-        let ppm     = state.ppm.load(Ordering::Relaxed);
-        let jitter  = state.jitter_ms.load(Ordering::Relaxed);
-        let p_gain  = state.get_p_gain();
+        let ppm = state.ppm.load(Ordering::Relaxed);
+        let jitter = state.jitter_ms.load(Ordering::Relaxed);
+        let p_gain = state.get_p_gain();
 
         terminal.draw(|f| {
             let chunks = Layout::default()
@@ -486,7 +519,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     KeyCode::Char('-') => {
                         let v = state.jitter_ms.load(Ordering::Relaxed);
-                        state.jitter_ms.store(v.saturating_sub(50).max(50), Ordering::Relaxed);
+                        state
+                            .jitter_ms
+                            .store(v.saturating_sub(50).max(50), Ordering::Relaxed);
                     }
                     KeyCode::Char(']') => {
                         let v = (state.get_p_gain() * 2.0).min(P_GAIN_MAX);
@@ -503,7 +538,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         quit_pressed = true;
                         quit_timer = Instant::now();
                     }
-                    _ => { quit_pressed = false; }
+                    _ => {
+                        quit_pressed = false;
+                    }
                 }
             }
         }
@@ -525,8 +562,13 @@ fn run_wizard(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     output_devices: &[String],
 ) -> Result<Option<RecvConfig>, Box<dyn std::error::Error>> {
-    let default_cursor = SAMPLE_RATES.iter().position(|(r, _)| *r == 48000).unwrap_or(1);
-    let mut step = WizardStep::SelectSampleRate { cursor: default_cursor };
+    let default_cursor = SAMPLE_RATES
+        .iter()
+        .position(|(r, _)| *r == 48000)
+        .unwrap_or(1);
+    let mut step = WizardStep::SelectSampleRate {
+        cursor: default_cursor,
+    };
     let mut config = RecvConfig {
         sample_rate: 48000,
         output_device: None,
@@ -540,48 +582,51 @@ fn run_wizard(
             continue;
         }
         match event::read()? {
-            Event::Resize(_, _) => { terminal.autoresize()?; }
-            Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
-                match &mut step {
-                    WizardStep::SelectSampleRate { cursor } => match key.code {
-                        KeyCode::Up   => *cursor = cursor.saturating_sub(1),
-                        KeyCode::Down => *cursor = (*cursor + 1).min(SAMPLE_RATES.len() - 1),
-                        KeyCode::Enter => {
-                            config.sample_rate = SAMPLE_RATES[*cursor].0;
-                            step = WizardStep::SelectOutput {
-                                devices: output_devices.to_vec(),
-                                cursor: 0,
-                            };
-                        }
-                        KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
-                        _ => {}
-                    },
-                    WizardStep::SelectOutput { devices, cursor } => match key.code {
-                        KeyCode::Up   => *cursor = cursor.saturating_sub(1),
-                        KeyCode::Down => *cursor = (*cursor + 1).min(devices.len().saturating_sub(1)),
-                        KeyCode::Enter => {
-                            config.output_device = devices.get(*cursor).cloned();
-                            step = WizardStep::EnterPort { buf: String::new() };
-                        }
-                        KeyCode::Esc => return Ok(None),
-                        _ => {}
-                    },
-                    WizardStep::EnterPort { buf } => match key.code {
-                        KeyCode::Enter => {
-                            config.port = if buf.is_empty() {
-                                DEFAULT_PORT
-                            } else {
-                                buf.parse().unwrap_or(DEFAULT_PORT)
-                            };
-                            return Ok(Some(config));
-                        }
-                        KeyCode::Backspace => { buf.pop(); }
-                        KeyCode::Char(c) if c.is_ascii_digit() => buf.push(c),
-                        KeyCode::Esc => return Ok(None),
-                        _ => {}
-                    },
-                }
+            Event::Resize(_, _) => {
+                terminal.autoresize()?;
             }
+            Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => match &mut step
+            {
+                WizardStep::SelectSampleRate { cursor } => match key.code {
+                    KeyCode::Up => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down => *cursor = (*cursor + 1).min(SAMPLE_RATES.len() - 1),
+                    KeyCode::Enter => {
+                        config.sample_rate = SAMPLE_RATES[*cursor].0;
+                        step = WizardStep::SelectOutput {
+                            devices: output_devices.to_vec(),
+                            cursor: 0,
+                        };
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+                    _ => {}
+                },
+                WizardStep::SelectOutput { devices, cursor } => match key.code {
+                    KeyCode::Up => *cursor = cursor.saturating_sub(1),
+                    KeyCode::Down => *cursor = (*cursor + 1).min(devices.len().saturating_sub(1)),
+                    KeyCode::Enter => {
+                        config.output_device = devices.get(*cursor).cloned();
+                        step = WizardStep::EnterPort { buf: String::new() };
+                    }
+                    KeyCode::Esc => return Ok(None),
+                    _ => {}
+                },
+                WizardStep::EnterPort { buf } => match key.code {
+                    KeyCode::Enter => {
+                        config.port = if buf.is_empty() {
+                            DEFAULT_PORT
+                        } else {
+                            buf.parse().unwrap_or(DEFAULT_PORT)
+                        };
+                        return Ok(Some(config));
+                    }
+                    KeyCode::Backspace => {
+                        buf.pop();
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => buf.push(c),
+                    KeyCode::Esc => return Ok(None),
+                    _ => {}
+                },
+            },
             _ => {}
         }
     }
@@ -611,12 +656,16 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
                     .style(Style::default().fg(Color::Yellow)),
                 layout[0],
             );
-            let items: Vec<ListItem> = SAMPLE_RATES.iter().enumerate()
+            let items: Vec<ListItem> = SAMPLE_RATES
+                .iter()
+                .enumerate()
                 .map(|(i, (_, label))| {
                     let item = ListItem::new(format!("  {}", label));
                     if i == *cursor {
                         item.style(Style::default().fg(Color::Black).bg(Color::Cyan))
-                    } else { item }
+                    } else {
+                        item
+                    }
                 })
                 .collect();
             let mut s = ListState::default();
@@ -641,12 +690,16 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
                     layout[1],
                 );
             } else {
-                let items: Vec<ListItem> = devices.iter().enumerate()
+                let items: Vec<ListItem> = devices
+                    .iter()
+                    .enumerate()
                     .map(|(i, n)| {
                         let item = ListItem::new(format!("  {}", n));
                         if i == *cursor {
                             item.style(Style::default().fg(Color::Black).bg(Color::Cyan))
-                        } else { item }
+                        } else {
+                            item
+                        }
                     })
                     .collect();
                 let mut s = ListState::default();
@@ -661,7 +714,10 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
         }
         WizardStep::EnterPort { buf } => {
             let cands = netinfo::candidate_ipv4s();
-            let primary = cands.first().map(|ip| ip.to_string()).unwrap_or_else(|| "?.?.?.?".to_string());
+            let primary = cands
+                .first()
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "?.?.?.?".to_string());
             let extra: String = if cands.len() > 1 {
                 let others: Vec<String> = cands.iter().skip(1).map(|ip| ip.to_string()).collect();
                 format!("  (他候補: {})", others.join(", "))
@@ -679,9 +735,11 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
                 layout[0],
             );
             f.render_widget(
-                Paragraph::new(format!("  Port: {}█", buf))
-                    .block(Block::default().borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::Cyan))),
+                Paragraph::new(format!("  Port: {}█", buf)).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan)),
+                ),
                 layout[1],
             );
             f.render_widget(

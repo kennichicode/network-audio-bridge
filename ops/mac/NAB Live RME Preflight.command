@@ -10,6 +10,7 @@ RME_IP="${NAB_RME_IP:-192.168.1.20}"
 LISTEN_URL="https://livekit.kenichi-kawabata.com/"
 STATUS_CMD="$HOME/Desktop/NAB Live Status.command"
 SENDER_CMD="$HOME/Desktop/NAB Live Sender.command"
+PREPARE_LOG="/tmp/nab_tap_reload.log"
 
 ok_count=0
 ng_count=0
@@ -34,6 +35,47 @@ check_file() {
 
 reaper_pid() {
   pgrep -f "/REAPER.app/Contents/MacOS/REAPER" 2>/dev/null | head -1 || true
+}
+
+recent_prepare_log_confirms_tap() {
+  if [[ ! -f "$PREPARE_LOG" ]]; then
+    return 1
+  fi
+  local now mtime age
+  now="$(date +%s)"
+  mtime="$(stat -f %m "$PREPARE_LOG" 2>/dev/null || echo 0)"
+  age=$(( now - mtime ))
+  if (( age > 900 )); then
+    return 1
+  fi
+  grep -q "added_fx_name=.*NAB Tap" "$PREPARE_LOG" \
+    && grep -q "added_fx_offline=false" "$PREPARE_LOG"
+}
+
+reaper_windows_confirm_tap() {
+  osascript <<'OSA' 2>/dev/null | grep -qi "NAB Tap"
+tell application "System Events"
+  if not (exists process "REAPER") then return ""
+  tell process "REAPER"
+    set out to ""
+    repeat with w in windows
+      set out to out & name of w & linefeed
+    end repeat
+    return out
+  end tell
+end tell
+OSA
+}
+
+reaper_has_nab_tap() {
+  local pid="$1"
+  if lsof -p "$pid" 2>/dev/null | grep -q "NAB Tap.vst3"; then
+    return 0
+  fi
+  if reaper_windows_confirm_tap; then
+    return 0
+  fi
+  recent_prepare_log_confirms_tap
 }
 
 clear 2>/dev/null || true
@@ -96,10 +138,10 @@ echo "REAPER"
 pid="$(reaper_pid)"
 if [[ -n "$pid" ]]; then
   ok "REAPER running: pid=$pid"
-  if lsof -p "$pid" 2>/dev/null | grep -q "NAB Tap.vst3"; then
-    ok "REAPER has loaded NAB Tap.vst3"
+  if reaper_has_nab_tap "$pid"; then
+    ok "REAPER has NAB Tap on the Master FX path"
   else
-    ng "REAPER has not loaded NAB Tap.vst3"
+    ng "REAPER has not loaded NAB Tap.vst3; run NAB Live Prepare REAPER.command"
   fi
 else
   ng "REAPER is not running"

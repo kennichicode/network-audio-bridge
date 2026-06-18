@@ -10,12 +10,12 @@ BIN="$APP_DIR/nab-live"
 ENV_FILE="$HOME/.config/kenichi-vps/livekit.env"
 VST3_SRC="$APP_DIR/plugins/nab-tap/NAB Tap.vst3"
 VST3_DST="$HOME/Library/Audio/Plug-Ins/VST3/NAB Tap.vst3"
+TOOLS_DIR="$HOME/Desktop/NAB Live Tools"
 SENDER="$HOME/Desktop/NAB Live Sender.command"
 STATUS="$HOME/Desktop/NAB Live Status.command"
-TEST_TONE="$HOME/Desktop/NAB Live Test Tone.command"
-IPHONE_CHECK="$HOME/Desktop/NAB Live iPhone Check.command"
-RME_PREFLIGHT="$HOME/Desktop/NAB Live RME Preflight.command"
-REAPER_SELFTEST="$HOME/Desktop/NAB Live REAPER Selftest.command"
+IPHONE_CHECK="$TOOLS_DIR/NAB Live iPhone Check.command"
+RME_PREFLIGHT="$TOOLS_DIR/NAB Live RME Preflight.command"
+PREPARE_REAPER="$TOOLS_DIR/NAB Live Prepare REAPER.command"
 TOKEN_HEALTH_URL="https://livekit.kenichi-kawabata.com/healthz"
 
 ok_line() {
@@ -54,11 +54,6 @@ check_install() {
   else
     ng_line "Status command missing: $STATUS"
   fi
-  if [[ -x "$TEST_TONE" ]]; then
-    ok_line "Test tone command: $TEST_TONE"
-  else
-    ng_line "Test tone command missing: $TEST_TONE"
-  fi
   if [[ -x "$IPHONE_CHECK" ]]; then
     ok_line "iPhone check command: $IPHONE_CHECK"
   else
@@ -69,10 +64,10 @@ check_install() {
   else
     ng_line "RME preflight command missing: $RME_PREFLIGHT"
   fi
-  if [[ -x "$REAPER_SELFTEST" ]]; then
-    ok_line "REAPER selftest command: $REAPER_SELFTEST"
+  if [[ -x "$PREPARE_REAPER" ]]; then
+    ok_line "Prepare REAPER command: $PREPARE_REAPER"
   else
-    ng_line "REAPER selftest command missing: $REAPER_SELFTEST"
+    ng_line "Prepare REAPER command missing: $PREPARE_REAPER"
   fi
   if [[ -f "$ENV_FILE" ]]; then
     ok_line "LiveKit env file: $ENV_FILE"

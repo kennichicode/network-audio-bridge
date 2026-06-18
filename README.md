@@ -168,7 +168,6 @@ nab-live --source plugin
 nab-live --source plugin --profile stable-music
 nab-live --source plugin --profile hi-fi-music
 nab-live --source plugin --profile low-bandwidth --bitrate 96000
-nab-live --source test-tone --test-tone-hz 1000 --test-tone-dbfs=-18
 nab-live --source plugin --disable-red
 nab-live --source plugin --enable-dtx
 ```
@@ -187,11 +186,12 @@ Mac miniでの通常手順:
 
 1. `NAB Tap Installer.command` を一度実行する。
 2. REAPERを起動し、Master FXまたはMonitor FXに `VST3: NAB Tap (Kenichi Kawabata)` を挿す。
-3. 12Mic/AVB本番前は `NAB Live RME Preflight.command` でRME / AVB / REAPER / NAB Tapの前提を確認する。
-4. `NAB Live Sender.command` を開いたままにする。
-5. `NAB Live Status.command` で RTP packets/bytes が増えることを見る。
-6. ブラウザで `https://livekit.kenichi-kawabata.com/` を開き、数字の合言葉で `Listen`。
-7. listener接続後、`NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` と `ListenerProof: ... / Audio OK` を見る。
+3. `NAB Live Prepare REAPER.command` でREAPER Master FXにNAB Tapを確実に入れる。
+4. 12Mic/AVB本番前は `NAB Live RME Preflight.command` でRME / AVB / REAPER / NAB Tapの前提を確認する。
+5. `NAB Live Sender.command` を開いたままにする。
+6. `NAB Live Status.command` で RTP packets/bytes が増えることを見る。
+7. ブラウザで `https://livekit.kenichi-kawabata.com/` を開き、数字の合言葉で `Listen`。
+8. listener接続後、`NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` と `ListenerProof: ... / 音あり` を見る。
 
 REAPERなしでiPhone/browserだけ確認したい時:
 
@@ -199,29 +199,19 @@ REAPERなしでiPhone/browserだけ確認したい時:
 2. iPhoneで `https://livekit.kenichi-kawabata.com/` を開き、`Listen`。
 3. コマンド側に `PASS: iPhone is receiving and playing audio.` が出ることを見る。
 
-ブラウザだけで確認したい時は `NAB Live Test Tone.command` を開き、ブラウザでListenしたあと `NAB Live Status.command` の `ListenerProof: ... / Audio OK` を見ます。
-
-REAPER/NAB Tap経路だけを診断したい時:
-
-1. REAPERを起動し、Master FXまたはMonitor FXに `VST3: NAB Tap (Kenichi Kawabata)` を挿す。
-2. `NAB Live REAPER Selftest.command` を開く。
-3. コマンドの `REAPER selftest result` と `NAB Live Status.command` 出力で、VST3 packets / captured / sent / RTP packets が増えることを見る。
-
-この診断は一時テストトラックを作って削除しますが、REAPERのプロジェクトがmodified表示になることがあります。本番プロジェクトで実行した場合、selftest後に保存しないで閉じるか、必要に応じてUndoしてください。
-
 安全設計:
 
 - `NAB Tap Installer.command` はSenderを起動せず、VST3 / nab-live binary / Sender command / Status command / LiveKit token API を確認できます。`INSTALL` を入力した時だけVST3を再インストールします。
-- `NAB Live Test Tone.command` はREAPER/NAB Tapを使わず、10分間の1kHz/-18dBFS test toneをLiveKitへ送ります。iPhone/browserの実音確認用です。
-- `NAB Live iPhone Check.command` はsenderが動いていなければ一時的にtest toneを開始し、iPhone実機から `Audio OK` proof が届くまで待ちます。このコマンドが自分で始めたtest toneは、確認後に自分で停止します。
+- Audible test tone commands are disabled for recording safety and are not installed as clickable Desktop tools.
+- `NAB Live iPhone Check.command` never starts a test tone. It only waits for proof from the currently running real sender.
 - `NAB Live RME Preflight.command` は音を流さず、RME Web UI、AVB 16ch/96kHz、REAPER起動、REAPER内のNAB Tapロード状態を確認します。これは12Mic実音確認の前提チェックであり、実音が聞こえた証明ではありません。
-- `NAB Live REAPER Selftest.command` はREAPER内で短いtest toneを作り、NAB Tap -> nab-live -> LiveKit経路を確認します。12Mic本体の実音確認ではありません。
+- `NAB Live Prepare REAPER.command` は音を流さず、REAPER Master FXのNAB Tapを再ロードします。Preflightで `REAPER has not loaded NAB Tap.vst3` が出た時に使います。
 - `NAB Live Sender.command` は既存senderがある場合、二重起動せずPIDと状態だけ表示します。
 - `nab-live` 本体にも room/identity lock と NAB Tap socket lock があります。
 - `kill` / SIGTERM 時も lock/socket を掃除し、再起動時に古いsocketで詰まらないようにしています。
 - `NAB Live Status.command` は接続だけでなく、2秒間の `tap_packets` / `captured_frames` / `sent_frames` / RTP packets / RTP bytes / RMS / peak の増加を見ます。
 - `NAB Live Status.command` は `subscriber_count` と `listener_identities` を表示します。listenerがいない場合は「LiveKitには届いているがlistenerなし」と分けて表示します。
-- listen pageは、短寿命のproof keyで `Audio OK` / player state / packets / bytes をVPSへ送ります。`NAB Live Status.command` は最新の `ListenerProof` を表示するので、iPhone実機でListenした時に `iPhone / Audio OK` まで確認できます。
+- listen pageは、短寿命のproof keyで `音あり` / player state / packets / bytes / level をVPSへ送ります。`NAB Live Status.command` は最新の `ListenerProof` を表示するので、iPhone実機でListenした時に `iPhone / 音あり` まで確認できます。
 - `NAB Live Status.command` は `VST3 connected`、`frames_dropped_total`、`last_error`、ログファイルパスも表示します。
 - `https://livekit.kenichi-kawabata.com/` は購読専用ページです。listener token は `canPublish=false`, `canSubscribe=true`, 短寿命TTLです。
 - listen pageは受信packet/bytes/jitter/audio level/audio element状態を表示します。

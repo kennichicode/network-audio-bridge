@@ -148,30 +148,24 @@ fi
 echo "Sender PID(s): ${(j:, :)${(f)pids}}"
 ps -p ${(j:,:)${(f)pids}} -o pid=,etime=,command= 2>/dev/null || true
 echo ""
-source_kind="$(current_source_kind)"
-if [[ "$source_kind" == "test-tone" ]]; then
-  echo "Socket     : n/a (internal test tone bypasses NAB Tap/VST3)"
-  echo "Lock       : n/a (internal test tone bypasses NAB Tap/VST3)"
+if [[ -S "$SOCKET" ]]; then
+  echo "Socket     : ready ($SOCKET)"
 else
-  if [[ -S "$SOCKET" ]]; then
-    echo "Socket     : ready ($SOCKET)"
-  else
-    echo "Socket     : missing ($SOCKET)"
-  fi
-  if [[ -f "$LOCK" ]]; then
-    if grep -q "pid=" "$LOCK" 2>/dev/null; then
-      lock_pid="$(grep '^pid=' "$LOCK" 2>/dev/null | head -1 | cut -d= -f2)"
-      if [[ -n "$lock_pid" ]] && ps -p "$lock_pid" >/dev/null 2>&1; then
-        echo "Lock       : valid ($LOCK pid=$lock_pid)"
-      else
-        echo "Lock       : stale? ($LOCK pid=${lock_pid:-unknown})"
-      fi
+  echo "Socket     : missing ($SOCKET)"
+fi
+if [[ -f "$LOCK" ]]; then
+  if grep -q "pid=" "$LOCK" 2>/dev/null; then
+    lock_pid="$(grep '^pid=' "$LOCK" 2>/dev/null | head -1 | cut -d= -f2)"
+    if [[ -n "$lock_pid" ]] && ps -p "$lock_pid" >/dev/null 2>&1; then
+      echo "Lock       : valid ($LOCK pid=$lock_pid)"
     else
-      echo "Lock       : present but unreadable ($LOCK)"
+      echo "Lock       : stale? ($LOCK pid=${lock_pid:-unknown})"
     fi
   else
-    echo "Lock       : missing ($LOCK)"
+    echo "Lock       : present but unreadable ($LOCK)"
   fi
+else
+  echo "Lock       : missing ($LOCK)"
 fi
 runtime_locks=("$RUNTIME_LOCK_DIR"/nab-live-*.lock(N))
 if (( ${#runtime_locks[@]} > 0 )); then
@@ -277,13 +271,23 @@ print("")
 audio_moving = sent_delta > 0 and (tap_delta > 0 or b["source_kind"] != "plugin")
 rtp_moving = rtp_packet_delta > 0 and rtp_byte_delta > 0
 has_listener = int(b.get("subscriber_count", 0)) > 0
+active_audio = b["audio_state"] == "active" and max(
+    b["peak_left_milli"],
+    b["peak_right_milli"],
+    b["rms_left_milli"],
+    b["rms_right_milli"],
+) > 1
 
 if b["connection"] != "Connected":
     print("Result     : NOT READY. Sender is not connected to LiveKit.")
-elif audio_moving and rtp_moving and has_listener:
+elif audio_moving and rtp_moving and has_listener and active_audio:
     print("Result     : LIVE AUDIO IS MOVING TO A LISTENER NOW.")
-elif audio_moving and rtp_moving:
+elif audio_moving and rtp_moving and has_listener:
+    print("Result     : SIGNAL PATH IS MOVING TO A LISTENER, BUT CURRENT AUDIO IS SILENCE.")
+elif audio_moving and rtp_moving and active_audio:
     print("Result     : AUDIO IS REACHING LIVEKIT, BUT NO LISTENER IS CONNECTED.")
+elif audio_moving and rtp_moving:
+    print("Result     : SIGNAL PATH IS REACHING LIVEKIT, BUT CURRENT AUDIO IS SILENCE AND NO LISTENER IS CONNECTED.")
 elif audio_moving and not rtp_moving:
     print("Result     : AUDIO ENTERS SENDER, BUT LIVEKIT RTP IS NOT MOVING.")
 elif tap_delta > 0 and sent_delta == 0:
@@ -296,7 +300,7 @@ if problem_delta:
 elif problem_total:
     print("Note       : Old problems are recorded above, but they did not increase during this check.")
 elif tap_gap_delta:
-    print("Note       : Tap sequence jumped, usually from restarting REAPER/NAB Tap or a synthetic test tone.")
+    print("Note       : Tap sequence jumped, usually from restarting REAPER/NAB Tap or reopening the sender.")
 PY
 
 echo ""

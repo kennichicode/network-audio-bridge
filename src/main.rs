@@ -25,7 +25,7 @@ mod netinfo;
 mod netopts;
 mod packet;
 
-use packet::{packet_bytes, parse_header, write_header, HEADER_BYTES, PACKET_SAMPLES, ParseError};
+use packet::{packet_bytes, parse_header, write_header, ParseError, HEADER_BYTES, PACKET_SAMPLES};
 
 const CHANNELS: u16 = 2;
 const DEFAULT_PORT: u16 = 8000;
@@ -166,7 +166,12 @@ fn run_app(
             ensure_input_support(&dev, config.sample_rate)?;
             let addr = config.remote_addr.clone();
             let s = Arc::clone(&state);
-            send_thread = Some(spawn_sender(dev, stream_config(config.sample_rate), addr, s)?);
+            send_thread = Some(spawn_sender(
+                dev,
+                stream_config(config.sample_rate),
+                addr,
+                s,
+            )?);
         }
 
         if is_recv {
@@ -174,7 +179,12 @@ fn run_app(
             ensure_output_support(&dev, config.sample_rate)?;
             let addr = config.listen_addr.clone();
             let s = Arc::clone(&state);
-            recv_thread = Some(spawn_receiver(dev, stream_config(config.sample_rate), addr, s)?);
+            recv_thread = Some(spawn_receiver(
+                dev,
+                stream_config(config.sample_rate),
+                addr,
+                s,
+            )?);
         }
 
         run_tui(terminal, &config, &state).map_err(|e| e.to_string())
@@ -318,7 +328,8 @@ fn run_wizard(
             Event::Resize(_, _) => {
                 terminal.autoresize()?;
             }
-            Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => match &mut step {
+            Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => match &mut step
+            {
                 WizardStep::SelectMode { cursor } => match key.code {
                     KeyCode::Up => *cursor = cursor.saturating_sub(1),
                     KeyCode::Down => *cursor = (*cursor + 1).min(2),
@@ -471,7 +482,14 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
                     .style(Style::default().fg(Color::Yellow)),
                 layout[0],
             );
-            let rates = ["44.1 kHz", "48 kHz  (default)", "88.2 kHz", "96 kHz", "176.4 kHz", "192 kHz"];
+            let rates = [
+                "44.1 kHz",
+                "48 kHz  (default)",
+                "88.2 kHz",
+                "96 kHz",
+                "176.4 kHz",
+                "192 kHz",
+            ];
             let items: Vec<ListItem> = rates
                 .iter()
                 .enumerate()
@@ -562,7 +580,8 @@ fn draw_wizard(f: &mut ratatui::Frame, step: &WizardStep) {
                 layout[1],
             );
             f.render_widget(
-                Paragraph::new("Enter Confirm   Esc Quit").style(Style::default().fg(Color::DarkGray)),
+                Paragraph::new("Enter Confirm   Esc Quit")
+                    .style(Style::default().fg(Color::DarkGray)),
                 layout[2],
             );
         }
@@ -583,7 +602,10 @@ fn run_tui(
     let is_recv = matches!(config.mode, RunMode::Recv | RunMode::Duplex);
     let (my_ip, other_ips) = if is_recv {
         let cands = netinfo::candidate_ipv4s();
-        let primary = cands.first().map(|ip| ip.to_string()).unwrap_or_else(|| "?.?.?.?".to_string());
+        let primary = cands
+            .first()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "?.?.?.?".to_string());
         let others: Vec<String> = cands.iter().skip(1).map(|ip| ip.to_string()).collect();
         (primary, others)
     } else {
@@ -710,7 +732,10 @@ fn run_tui(
 
         if event::poll(Duration::from_millis(100))? {
             match event::read()? {
-                Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press && k.code == KeyCode::Char('q') => {
+                Event::Key(k)
+                    if k.kind == crossterm::event::KeyEventKind::Press
+                        && k.code == KeyCode::Char('q') =>
+                {
                     if quit_pending {
                         break;
                     } else {
@@ -718,13 +743,23 @@ fn run_tui(
                         quit_time = std::time::Instant::now();
                     }
                 }
-                Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press && (k.code == KeyCode::Char('+') || k.code == KeyCode::Char('=')) => {
+                Event::Key(k)
+                    if k.kind == crossterm::event::KeyEventKind::Press
+                        && (k.code == KeyCode::Char('+') || k.code == KeyCode::Char('=')) =>
+                {
                     let cur = state.jitter_buffer_ms.load(Ordering::Relaxed);
-                    state.jitter_buffer_ms.store((cur + 10).min(500), Ordering::Relaxed);
+                    state
+                        .jitter_buffer_ms
+                        .store((cur + 10).min(500), Ordering::Relaxed);
                 }
-                Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press && k.code == KeyCode::Char('-') => {
+                Event::Key(k)
+                    if k.kind == crossterm::event::KeyEventKind::Press
+                        && k.code == KeyCode::Char('-') =>
+                {
                     let cur = state.jitter_buffer_ms.load(Ordering::Relaxed);
-                    state.jitter_buffer_ms.store(cur.saturating_sub(10).max(50), Ordering::Relaxed);
+                    state
+                        .jitter_buffer_ms
+                        .store(cur.saturating_sub(10).max(50), Ordering::Relaxed);
                 }
                 Event::Resize(_, _) => terminal.autoresize()?,
                 _ => {}
@@ -827,7 +862,10 @@ fn run_sender(
             }
             write_header(&mut pkt[0..HEADER_BYTES], sr as u32, ch as u8, seq);
             for (i, &s) in buf.iter().enumerate() {
-                LittleEndian::write_f32(&mut pkt[HEADER_BYTES + i * 4..HEADER_BYTES + (i + 1) * 4], s);
+                LittleEndian::write_f32(
+                    &mut pkt[HEADER_BYTES + i * 4..HEADER_BYTES + (i + 1) * 4],
+                    s,
+                );
             }
             match socket.send_to(&pkt, &target) {
                 Ok(_) => {
@@ -909,16 +947,22 @@ fn run_receiver(
         &cfg,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             if rebuffering_cb.load(Ordering::Relaxed) {
-                for s in data.iter_mut() { *s = 0.0; }
+                for s in data.iter_mut() {
+                    *s = 0.0;
+                }
                 state_cb.recv_buffer_pct.store(0, Ordering::Relaxed);
                 return;
             }
             let read = cons.pop_slice(data);
-            for s in data.iter_mut().skip(read) { *s = 0.0; }
+            for s in data.iter_mut().skip(read) {
+                *s = 0.0;
+            }
             if read == 0 {
                 rebuffering_cb.store(true, Ordering::Relaxed);
             }
-            state_cb.recv_buffer_pct.store(read * 100 / data.len().max(1), Ordering::Relaxed);
+            state_cb
+                .recv_buffer_pct
+                .store(read * 100 / data.len().max(1), Ordering::Relaxed);
         },
         |e| log::log(&format!("output stream error: {}", e)),
         None,
@@ -945,9 +989,21 @@ fn run_receiver(
                         if last_mismatch_log.elapsed() > Duration::from_secs(5) {
                             match e {
                                 ParseError::BadMagic => log::log("rx: bad magic / alien packet"),
-                                ParseError::UnsupportedVersion(v) => log::log(&format!("rx: unsupported version {}", v)),
-                                ParseError::SampleRateMismatch { got, expected } => log::log(&format!("rx: sample rate mismatch got={} expected={}", got, expected)),
-                                ParseError::ChannelsMismatch { got, expected } => log::log(&format!("rx: channels mismatch got={} expected={}", got, expected)),
+                                ParseError::UnsupportedVersion(v) => {
+                                    log::log(&format!("rx: unsupported version {}", v))
+                                }
+                                ParseError::SampleRateMismatch { got, expected } => {
+                                    log::log(&format!(
+                                        "rx: sample rate mismatch got={} expected={}",
+                                        got, expected
+                                    ))
+                                }
+                                ParseError::ChannelsMismatch { got, expected } => {
+                                    log::log(&format!(
+                                        "rx: channels mismatch got={} expected={}",
+                                        got, expected
+                                    ))
+                                }
                             }
                             last_mismatch_log = std::time::Instant::now();
                         }
@@ -964,7 +1020,9 @@ fn run_receiver(
                         let fill = diff.min(32) as usize * PACKET_SAMPLES * ch;
                         let mut dropped = 0u64;
                         for _ in 0..fill {
-                            if prod.push(0.0).is_err() { dropped += 1; }
+                            if prod.push(0.0).is_err() {
+                                dropped += 1;
+                            }
                         }
                         if dropped > 0 {
                             state.buf_overflow.fetch_add(dropped, Ordering::Relaxed);
@@ -975,8 +1033,12 @@ fn run_receiver(
                 expected = Some(seq.wrapping_add(1));
                 let mut dropped = 0u64;
                 for i in 0..(PACKET_SAMPLES * ch) {
-                    let s = LittleEndian::read_f32(&pkt[HEADER_BYTES + i * 4..HEADER_BYTES + (i + 1) * 4]);
-                    if prod.push(s).is_err() { dropped += 1; }
+                    let s = LittleEndian::read_f32(
+                        &pkt[HEADER_BYTES + i * 4..HEADER_BYTES + (i + 1) * 4],
+                    );
+                    if prod.push(s).is_err() {
+                        dropped += 1;
+                    }
                 }
                 if dropped > 0 {
                     state.buf_overflow.fetch_add(dropped, Ordering::Relaxed);

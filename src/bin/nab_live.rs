@@ -15,7 +15,7 @@ use livekit_api::access_token::{AccessToken, VideoGrants};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph},
     Terminal,
 };
@@ -68,7 +68,6 @@ type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 enum SourceArg {
     Plugin,
     Coreaudio,
-    TestTone,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -120,22 +119,6 @@ struct Args {
     /// CoreAudio input sample rate. Use 96000 for a 96kHz REAPER session.
     #[arg(long, default_value_t = 96_000)]
     input_sample_rate: u32,
-
-    /// Use an internal test tone instead of REAPER/NAB Tap. This bypasses VST3.
-    #[arg(long)]
-    test_tone: bool,
-
-    /// Test tone duration in seconds. Omit for continuous tone.
-    #[arg(long)]
-    test_tone_duration: Option<f64>,
-
-    /// Test tone frequency in Hz.
-    #[arg(long, default_value_t = 1_000.0)]
-    test_tone_hz: f32,
-
-    /// Test tone level in dBFS.
-    #[arg(long, default_value_t = -18.0)]
-    test_tone_dbfs: f32,
 
     /// Number of channels to open on the CoreAudio input device.
     #[arg(long, default_value_t = 2)]
@@ -215,11 +198,6 @@ enum CaptureConfig {
     Plugin {
         socket_path: String,
     },
-    TestTone {
-        frequency_hz: f32,
-        level_dbfs: f32,
-        duration: Option<Duration>,
-    },
     CoreAudio {
         input: Option<String>,
         input_sample_rate: u32,
@@ -233,6 +211,8 @@ struct RuntimeInfo {
     source_label: String,
     source_kind: String,
     livekit_url: String,
+    listen_url: String,
+    listen_passcode: String,
     room: String,
     identity: String,
     status_file: PathBuf,
@@ -317,7 +297,6 @@ enum CaptureGuard {
     CoreAudio(cpal::Stream),
     #[cfg(unix)]
     Plugin(PluginCaptureGuard),
-    TestTone(TestToneGuard),
 }
 
 impl CaptureGuard {
@@ -331,10 +310,6 @@ impl CaptureGuard {
             CaptureGuard::Plugin(guard) => {
                 let _ = guard.running.load(Ordering::Relaxed);
                 "plugin"
-            }
-            CaptureGuard::TestTone(guard) => {
-                let _ = guard.running.load(Ordering::Relaxed);
-                "test-tone"
             }
         }
     }
@@ -360,20 +335,6 @@ fn install_termination_handler() {}
 
 fn termination_requested() -> bool {
     TERMINATE_REQUESTED.load(Ordering::SeqCst)
-}
-
-struct TestToneGuard {
-    running: Arc<AtomicBool>,
-    handle: Option<thread::JoinHandle<()>>,
-}
-
-impl Drop for TestToneGuard {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
 }
 
 struct RuntimeInstanceLock {
@@ -469,6 +430,10 @@ async fn main() -> AppResult<()> {
         .clone()
         .or_else(|| read_key(&env, &["LIVEKIT_SECRET", "LIVEKIT_API_SECRET"]))
         .ok_or_else(|| io_error("LIVEKIT_SECRET/LIVEKIT_API_SECRET is missing"))?;
+    let listen_url = read_key(&env, &["LIVEKIT_LISTEN_URL"])
+        .unwrap_or_else(|| "https://livekit.kenichi-kawabata.com/".to_string());
+    let listen_passcode =
+        read_key(&env, &["LIVEKIT_LISTEN_PASSCODE"]).unwrap_or_else(|| "(not set)".to_string());
 
     let livekit_config = LiveKitConfig {
         url: livekit_url.clone(),
@@ -505,6 +470,8 @@ async fn main() -> AppResult<()> {
         source_label: capture.source_label.clone(),
         source_kind: capture_guard_kind,
         livekit_url: livekit_url.clone(),
+        listen_url,
+        listen_passcode,
         room: args.room.clone(),
         identity: args.identity.clone(),
         status_file,
@@ -983,7 +950,7 @@ fn last_error_snapshot(state: &State) -> String {
 }
 
 fn should_show_wizard(args: &Args) -> bool {
-    args.source.is_none() && args.input.is_none() && !args.test_tone
+    args.source.is_none() && args.input.is_none()
 }
 
 fn resolve_audio_send_config(args: &Args) -> AppResult<AudioSendConfig> {
@@ -1038,34 +1005,10 @@ fn validate_buffer_seconds(seconds: usize) -> AppResult<()> {
 }
 
 fn capture_config_from_args(args: &Args) -> AppResult<CaptureConfig> {
-    if args.test_tone || args.source == Some(SourceArg::TestTone) {
-        if !(20.0..=20_000.0).contains(&args.test_tone_hz) {
-            return Err(io_error("test-tone-hz must be 20..=20000").into());
-        }
-        if !(-90.0..=0.0).contains(&args.test_tone_dbfs) {
-            return Err(io_error("test-tone-dbfs must be -90..=0").into());
-        }
-        let duration = match args.test_tone_duration {
-            Some(seconds) if seconds > 0.0 && seconds <= 24.0 * 60.0 * 60.0 => {
-                Some(Duration::from_secs_f64(seconds))
-            }
-            Some(_) => {
-                return Err(io_error("test-tone-duration must be >0 and <=86400 seconds").into());
-            }
-            None => None,
-        };
-        return Ok(CaptureConfig::TestTone {
-            frequency_hz: args.test_tone_hz,
-            level_dbfs: args.test_tone_dbfs,
-            duration,
-        });
-    }
-
     match args.source.unwrap_or(SourceArg::Coreaudio) {
         SourceArg::Plugin => Ok(CaptureConfig::Plugin {
             socket_path: args.plugin_socket.clone(),
         }),
-        SourceArg::TestTone => unreachable!("test tone handled above"),
         SourceArg::Coreaudio => {
             validate_coreaudio_selection(
                 args.input_channels,
@@ -1190,11 +1133,6 @@ fn run_wizard_inner(
                                 input_channels: OUT_CHANNELS as u16,
                                 left_channel: 1,
                                 right_channel: 2,
-                            },
-                            SourceArg::TestTone => CaptureConfig::TestTone {
-                                frequency_hz: 1_000.0,
-                                level_dbfs: -18.0,
-                                duration: None,
                             },
                         }));
                     }
@@ -1339,17 +1277,6 @@ fn start_capture(
         CaptureConfig::Plugin { socket_path } => {
             start_plugin_capture(&socket_path, state, ring_buffer_seconds)
         }
-        CaptureConfig::TestTone {
-            frequency_hz,
-            level_dbfs,
-            duration,
-        } => start_test_tone_capture(
-            frequency_hz,
-            level_dbfs,
-            duration,
-            state,
-            ring_buffer_seconds,
-        ),
         CaptureConfig::CoreAudio {
             input,
             input_sample_rate,
@@ -1384,60 +1311,24 @@ fn start_plugin_capture(
     configure_tap_socket(socket.as_raw_fd());
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
 
+    eprintln!("NAB Tap receiver socket ready: {}", socket_path.display());
     eprintln!(
-        "Waiting for NAB Tap plugin at {} ...",
-        socket_path.display()
+        "TUI starts immediately; tapPackets stays 0 until REAPER/NAB Tap sends audio callbacks."
     );
-    let mut last_wait_notice = Instant::now();
 
-    let mut buf = vec![0u8; TAP_MAX_PACKET_BYTES];
-    let (first_packet_bytes, first_packet) = loop {
-        if termination_requested() {
-            let _ = fs::remove_file(&socket_path);
-            return Err(io_error("shutdown requested before first NAB Tap packet").into());
-        }
-        match socket.recv(&mut buf) {
-            Ok(amt) => match parse_tap_packet(&buf[..amt]) {
-                Ok(packet) => {
-                    let bytes = buf[..amt].to_vec();
-                    break (bytes, packet.into_owned());
-                }
-                Err(err) => {
-                    state.capture_errors.fetch_add(1, Ordering::Relaxed);
-                    set_last_error(&state, format!("tap packet ignored: {err}"));
-                    log::log(&format!("tap packet ignored: {err}"));
-                }
-            },
-            Err(err)
-                if err.kind() == io::ErrorKind::WouldBlock
-                    || err.kind() == io::ErrorKind::TimedOut =>
-            {
-                if last_wait_notice.elapsed() >= Duration::from_secs(5) {
-                    eprintln!(
-                        "Still waiting for NAB Tap audio. Start REAPER playback/monitoring and make sure NAB Tap is inserted on Master FX or Monitor FX."
-                    );
-                    last_wait_notice = Instant::now();
-                }
-                continue;
-            }
-            Err(err) => return Err(err.into()),
-        }
-    };
-
-    let input_rate = first_packet.sample_rate;
+    let input_rate = 96_000u32;
     let ring_capacity =
         input_rate.max(OUT_RATE) as usize * OUT_CHANNELS * ring_buffer_seconds.max(1);
     let rb = HeapRb::<f32>::new(ring_capacity);
     let (mut prod, cons) = rb.split();
-    let mut scratch = vec![0.0f32; TAP_MAX_PACKET_BYTES / std::mem::size_of::<f32>()];
-    push_tap_packet(&first_packet, &mut prod, &state, &mut scratch);
+    let scratch = vec![0.0f32; TAP_MAX_PACKET_BYTES / std::mem::size_of::<f32>()];
 
     let running = Arc::new(AtomicBool::new(true));
     let running_thread = Arc::clone(&running);
     let state_thread = Arc::clone(&state);
     let handle = thread::spawn(move || {
-        let mut expected_seq = first_packet.seq.wrapping_add(1);
-        drop(first_packet_bytes);
+        let mut expected_seq: Option<u64> = None;
+        let mut last_wait_notice = Instant::now();
         let mut recv_buf = vec![0u8; TAP_MAX_PACKET_BYTES];
         let mut scratch = scratch;
         while running_thread.load(Ordering::Relaxed) {
@@ -1462,10 +1353,12 @@ fn start_plugin_capture(
                             ));
                             continue;
                         }
-                        if packet.seq != expected_seq {
-                            state_thread.tap_seq_gaps.fetch_add(1, Ordering::Relaxed);
+                        if let Some(expected) = expected_seq {
+                            if packet.seq != expected {
+                                state_thread.tap_seq_gaps.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
-                        expected_seq = packet.seq.wrapping_add(1);
+                        expected_seq = Some(packet.seq.wrapping_add(1));
                         push_tap_packet(&packet, &mut prod, &state_thread, &mut scratch);
                     }
                     Err(err) => {
@@ -1478,6 +1371,17 @@ fn start_plugin_capture(
                     if err.kind() == io::ErrorKind::WouldBlock
                         || err.kind() == io::ErrorKind::TimedOut =>
                 {
+                    if expected_seq.is_none()
+                        && last_wait_notice.elapsed() >= Duration::from_secs(5)
+                    {
+                        set_last_error(
+                            &state_thread,
+                            "waiting for NAB Tap audio callbacks; open/play/monitor REAPER"
+                                .to_string(),
+                        );
+                        log::log("waiting for NAB Tap audio callbacks");
+                        last_wait_notice = Instant::now();
+                    }
                     continue;
                 }
                 Err(err) => {
@@ -1503,6 +1407,17 @@ fn start_plugin_capture(
     })
 }
 
+#[cfg(not(unix))]
+fn start_plugin_capture(
+    _socket_path: &str,
+    _state: Arc<State>,
+    _ring_buffer_seconds: usize,
+) -> AppResult<CaptureSetup> {
+    Err(
+        io_error("NAB Tap plugin capture uses Unix sockets and is only available on macOS/Linux")
+            .into(),
+    )
+}
 #[cfg(unix)]
 fn configure_tap_socket(fd: std::os::unix::io::RawFd) {
     let size: libc::c_int = 4 * 1024 * 1024;
@@ -1515,15 +1430,6 @@ fn configure_tap_socket(fd: std::os::unix::io::RawFd) {
             std::mem::size_of_val(&size) as libc::socklen_t,
         );
     }
-}
-
-#[cfg(not(unix))]
-fn start_plugin_capture(
-    _socket_path: &str,
-    _state: Arc<State>,
-    _ring_buffer_seconds: usize,
-) -> AppResult<CaptureSetup> {
-    Err(io_error("NAB Tap plugin IPC is only supported on macOS/Linux").into())
 }
 
 #[cfg(unix)]
@@ -1690,95 +1596,6 @@ fn start_coreaudio_capture(
     })
 }
 
-fn start_test_tone_capture(
-    frequency_hz: f32,
-    level_dbfs: f32,
-    duration: Option<Duration>,
-    state: Arc<State>,
-    ring_buffer_seconds: usize,
-) -> AppResult<CaptureSetup> {
-    let input_rate = OUT_RATE;
-    let ring_capacity = input_rate as usize * OUT_CHANNELS * ring_buffer_seconds.max(1);
-    let rb = HeapRb::<f32>::new(ring_capacity);
-    let (mut prod, cons) = rb.split();
-    let running = Arc::new(AtomicBool::new(true));
-    let running_thread = Arc::clone(&running);
-    let state_thread = Arc::clone(&state);
-    let amplitude = 10.0f32.powf(level_dbfs / 20.0);
-    let frames_per_chunk = (input_rate as usize * OUT_FRAME_MS as usize) / 1000;
-    let sleep_duration = Duration::from_millis(OUT_FRAME_MS as u64);
-
-    let handle = thread::spawn(move || {
-        let started = Instant::now();
-        let mut frame_index: u64 = 0;
-        let mut chunk = vec![0.0f32; frames_per_chunk * OUT_CHANNELS];
-        while running_thread.load(Ordering::Relaxed) {
-            if duration.is_some_and(|limit| started.elapsed() >= limit) {
-                thread::sleep(Duration::from_millis(50));
-                continue;
-            }
-
-            let mut peak_l = 0.0f32;
-            let mut peak_r = 0.0f32;
-            let mut sum_l = 0.0f64;
-            let mut sum_r = 0.0f64;
-            for frame in 0..frames_per_chunk {
-                let t = frame_index as f32 / input_rate as f32;
-                let sample = amplitude * (std::f32::consts::TAU * frequency_hz * t).sin();
-                chunk[frame * OUT_CHANNELS] = sample;
-                chunk[frame * OUT_CHANNELS + 1] = sample;
-                peak_l = peak_l.max(sample.abs());
-                peak_r = peak_r.max(sample.abs());
-                sum_l += (sample as f64) * (sample as f64);
-                sum_r += (sample as f64) * (sample as f64);
-                frame_index = frame_index.wrapping_add(1);
-            }
-
-            if prod.free_len() >= chunk.len() {
-                let pushed = prod.push_slice(&chunk);
-                state_thread
-                    .captured_frames
-                    .fetch_add((pushed / OUT_CHANNELS) as u64, Ordering::Relaxed);
-                if pushed != chunk.len() {
-                    state_thread.overflow_frames.fetch_add(
-                        ((chunk.len() - pushed) / OUT_CHANNELS) as u64,
-                        Ordering::Relaxed,
-                    );
-                }
-            } else {
-                state_thread
-                    .overflow_frames
-                    .fetch_add(frames_per_chunk as u64, Ordering::Relaxed);
-            }
-            store_levels(
-                &state_thread,
-                peak_l,
-                peak_r,
-                (sum_l / frames_per_chunk as f64).sqrt() as f32,
-                (sum_r / frames_per_chunk as f64).sqrt() as f32,
-            );
-            thread::sleep(sleep_duration);
-        }
-    });
-
-    let duration_label = duration
-        .map(|d| format!(", {:.1}s", d.as_secs_f64()))
-        .unwrap_or_else(|| ", continuous".to_string());
-
-    Ok(CaptureSetup {
-        input_rate,
-        source_label: format!(
-            "Internal test tone ({:.0} Hz, {:.1} dBFS{duration_label})",
-            frequency_hz, level_dbfs
-        ),
-        guard: CaptureGuard::TestTone(TestToneGuard {
-            running,
-            handle: Some(handle),
-        }),
-        cons,
-    })
-}
-
 fn acquire_runtime_instance_lock(room: &str, identity: &str) -> AppResult<RuntimeInstanceLock> {
     let lock_dir = expand_tilde("~/.nab/locks");
     fs::create_dir_all(&lock_dir)?;
@@ -1843,19 +1660,6 @@ struct TapPacket<'a> {
     seq: u64,
     dropped_frames: u64,
     payload: std::borrow::Cow<'a, [u8]>,
-}
-
-impl<'a> TapPacket<'a> {
-    fn into_owned(self) -> TapPacket<'static> {
-        TapPacket {
-            sample_rate: self.sample_rate,
-            channels: self.channels,
-            frames: self.frames,
-            seq: self.seq,
-            dropped_frames: self.dropped_frames,
-            payload: std::borrow::Cow::Owned(self.payload.into_owned()),
-        }
-    }
 }
 
 fn parse_tap_packet(buf: &[u8]) -> Result<TapPacket<'_>, String> {
@@ -1953,6 +1757,8 @@ fn push_tap_packet(
             ((converted.len() - pushed) / OUT_CHANNELS) as u64,
             Ordering::Relaxed,
         );
+    } else {
+        clear_last_error(state);
     }
     state.tap_packets.fetch_add(1, Ordering::Relaxed);
     state
@@ -2265,9 +2071,10 @@ async fn run_status_tui_inner(
 fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, quit_pending: bool) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
+        .margin(0)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(5),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -2276,27 +2083,56 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
         ])
         .split(f.area());
 
+    let connection = connection_label(state.connection_state.load(Ordering::Relaxed));
+    let connection_style = match connection {
+        "Connected" => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        "Reconnecting" => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        "Disconnected" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    };
+
     f.render_widget(
         Paragraph::new(format!(
-            " {}  room={}  identity={}  {}",
-            runtime.livekit_url,
-            runtime.room,
-            runtime.identity,
-            connection_label(state.connection_state.load(Ordering::Relaxed))
+            " {}   room={}   identity={}",
+            connection, runtime.room, runtime.identity
         ))
         .block(
             Block::default()
-                .title("NAB Live")
+                .title("NAB Live Sender")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
         )
-        .style(Style::default().fg(Color::Cyan)),
+        .style(connection_style),
         rows[0],
     );
 
     f.render_widget(
         Paragraph::new(format!(
-            " Source : {}\n Output : 48 kHz stereo Opus/WebRTC\n Profile: {}  bitrate={} kbps  RED={}  DTX={}  queue={} ms",
+            " Listen URL: {}\n Passcode  : {}",
+            runtime.listen_url, runtime.listen_passcode
+        ))
+        .block(
+            Block::default()
+                .title("Browser Listen")
+                .borders(Borders::ALL),
+        )
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        rows[1],
+    );
+
+    f.render_widget(
+        Paragraph::new(format!(
+            " Input : {}\n Output: 48 kHz stereo Opus/WebRTC\n Profile: {}  bitrate={} kbps  RED={}  DTX={}  queue={} ms",
             runtime.source_label,
             profile_label(runtime.audio_profile),
             runtime.bitrate / 1000,
@@ -2305,7 +2141,7 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
             runtime.livekit_buffer_ms
         ))
         .block(Block::default().title("Signal").borders(Borders::ALL)),
-        rows[1],
+        rows[2],
     );
 
     let buffer_ms = state.ring_buffer_ms.load(Ordering::Relaxed);
@@ -2316,7 +2152,7 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
             .gauge_style(Style::default().fg(Color::Cyan))
             .percent(buffer_pct)
             .label(format!("{buffer_ms} ms")),
-        rows[2],
+        rows[3],
     );
 
     let peak_l = state.peak_l_milli.load(Ordering::Relaxed);
@@ -2336,7 +2172,7 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
                 peak_l as f32 / 1000.0,
                 peak_r as f32 / 1000.0
             )),
-        rows[3],
+        rows[4],
     );
 
     let captured = state.captured_frames.load(Ordering::Relaxed);
@@ -2365,7 +2201,7 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
         } else {
             Color::Cyan
         })),
-        rows[4],
+        rows[5],
     );
 
     let help = if quit_pending {
@@ -2385,7 +2221,7 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
             } else {
                 Color::DarkGray
             })),
-        rows[5],
+        rows[6],
     );
 }
 
@@ -2621,7 +2457,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
             "  \"source\": {source},\n",
             "  \"source_kind\": {source_kind},\n",
             "  \"livekit_url\": {livekit_url},\n",
-            "  \"listen_url\": \"https://livekit.kenichi-kawabata.com/\",\n",
+            "  \"listen_url\": {listen_url},\n",
             "  \"log_path\": {log_path},\n",
             "  \"room\": {room},\n",
             "  \"identity\": {identity},\n",
@@ -2671,6 +2507,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
         source = json_string(&runtime.source_label),
         source_kind = json_string(&runtime.source_kind),
         livekit_url = json_string(&runtime.livekit_url),
+        listen_url = json_string(&runtime.listen_url),
         log_path = json_string(&runtime.log_path.display().to_string()),
         room = json_string(&runtime.room),
         identity = json_string(&runtime.identity),

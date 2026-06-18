@@ -16,6 +16,29 @@ LIVEKIT_BUFFER_MS="${NAB_LIVE_BUFFER_MS:-}"
 RED_DISABLED="${NAB_LIVE_DISABLE_RED:-}"
 DTX_ENABLED="${NAB_LIVE_ENABLE_DTX:-}"
 
+env_value() {
+  local key="$1"
+  if [[ ! -f "$ENV_FILE" || ! -x /usr/bin/python3 ]]; then
+    return 1
+  fi
+  /usr/bin/python3 - "$ENV_FILE" "$key" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+for line in path.read_text().splitlines():
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    left, right = line.split("=", 1)
+    if left.strip() == key:
+        print(right.strip().strip("'\""))
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 print_header() {
   clear 2>/dev/null || true
   echo "NAB Live Sender"
@@ -26,6 +49,11 @@ print_header() {
   echo ""
   echo "Listen:"
   echo "  https://livekit.kenichi-kawabata.com/"
+  local passcode
+  passcode="$(env_value LIVEKIT_LISTEN_PASSCODE 2>/dev/null || true)"
+  if [[ -n "$passcode" ]]; then
+    echo "  passcode: $passcode"
+  fi
   echo ""
 }
 
@@ -144,7 +172,6 @@ args=(
   --room "reaper-master"
   --identity "nab-live-mac-mini"
   --profile "$PROFILE"
-  --no-tui
 )
 
 if [[ -n "$BITRATE" ]]; then
@@ -169,7 +196,8 @@ echo "Default: stable-music = 160 kbps / RED on / DTX off"
 echo "Socket : $SOCKET"
 echo "Status : $STATUS_FILE"
 echo ""
-echo "Keep this window open while listening."
+echo "The blue/cyan live status screen will open next."
+echo "Keep this window open while listening. Press q twice to stop the sender."
 echo ""
 
 "$BIN" "${args[@]}"
