@@ -45,6 +45,7 @@ for file in \
   "Start NAB Live Only.command" \
   "Start NAB Live Wizard.command" \
   "NAB Live Test Tone.command" \
+  "NAB Live iPhone Check.command" \
   "NAB Live Status.command"; do
   install -m 755 "$REPO_ROOT/ops/mac/$file" "$APP_DIR/$file"
 done
@@ -52,6 +53,7 @@ done
 install -m 755 "$APP_DIR/Start NAB Live Only.command" "$DESKTOP_DIR/NAB Live Sender.command"
 install -m 755 "$APP_DIR/NAB Live Status.command" "$DESKTOP_DIR/NAB Live Status.command"
 install -m 755 "$APP_DIR/NAB Live Test Tone.command" "$DESKTOP_DIR/NAB Live Test Tone.command"
+install -m 755 "$APP_DIR/NAB Live iPhone Check.command" "$DESKTOP_DIR/NAB Live iPhone Check.command"
 install -m 755 "$APP_DIR/Install NAB Tap Plugin.command" "$DESKTOP_DIR/NAB Tap Installer.command"
 rm -f "$DESKTOP_DIR/NAB Live Wizard.command"
 
@@ -59,6 +61,7 @@ install -m 755 "$APP_DIR/Start NAB Live Only.command" "$HOME/Applications/NAB Li
 install -m 755 "$APP_DIR/Start NAB Live Wizard.command" "$HOME/Applications/NAB Live Advanced Wizard.command"
 install -m 755 "$APP_DIR/NAB Live Status.command" "$HOME/Applications/NAB Live Status.command"
 install -m 755 "$APP_DIR/NAB Live Test Tone.command" "$HOME/Applications/NAB Live Test Tone.command"
+install -m 755 "$APP_DIR/NAB Live iPhone Check.command" "$HOME/Applications/NAB Live iPhone Check.command"
 install -m 755 "$APP_DIR/Install NAB Tap Plugin.command" "$HOME/Applications/NAB Tap Installer.command"
 
 "$APP_DIR/install-nab-tap-plugin.sh" "$APP_DIR/plugins/nab-tap"
@@ -72,4 +75,5 @@ echo "Launchers:"
 echo "  $DESKTOP_DIR/NAB Live Sender.command"
 echo "  $DESKTOP_DIR/NAB Live Status.command"
 echo "  $DESKTOP_DIR/NAB Live Test Tone.command"
+echo "  $DESKTOP_DIR/NAB Live iPhone Check.command"
 echo "  $DESKTOP_DIR/NAB Tap Installer.command"

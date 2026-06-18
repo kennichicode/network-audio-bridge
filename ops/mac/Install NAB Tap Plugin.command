@@ -10,6 +10,7 @@ VST3_DST="$HOME/Library/Audio/Plug-Ins/VST3/NAB Tap.vst3"
 SENDER="$HOME/Desktop/NAB Live Sender.command"
 STATUS="$HOME/Desktop/NAB Live Status.command"
 TEST_TONE="$HOME/Desktop/NAB Live Test Tone.command"
+IPHONE_CHECK="$HOME/Desktop/NAB Live iPhone Check.command"
 TOKEN_HEALTH_URL="https://livekit.kenichi-kawabata.com/healthz"
 
 ok_line() {
@@ -52,6 +53,11 @@ check_install() {
     ok_line "Test tone command: $TEST_TONE"
   else
     ng_line "Test tone command missing: $TEST_TONE"
+  fi
+  if [[ -x "$IPHONE_CHECK" ]]; then
+    ok_line "iPhone check command: $IPHONE_CHECK"
+  else
+    ng_line "iPhone check command missing: $IPHONE_CHECK"
   fi
   if [[ -f "$ENV_FILE" ]]; then
     ok_line "LiveKit env file: $ENV_FILE"

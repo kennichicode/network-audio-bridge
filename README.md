@@ -194,14 +194,17 @@ Mac miniでの通常手順:
 
 REAPERなしでiPhone/browserだけ確認したい時:
 
-1. `NAB Live Test Tone.command` を開く。
-2. iPhone/browserで `https://livekit.kenichi-kawabata.com/` を開き、`Listen`。
-3. `NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` と `ListenerProof: ... / Audio OK` を見る。
+1. `NAB Live iPhone Check.command` を開く。
+2. iPhoneで `https://livekit.kenichi-kawabata.com/` を開き、`Listen`。
+3. コマンド側に `PASS: iPhone is receiving and playing audio.` が出ることを見る。
+
+ブラウザだけで確認したい時は `NAB Live Test Tone.command` を開き、ブラウザでListenしたあと `NAB Live Status.command` の `ListenerProof: ... / Audio OK` を見ます。
 
 安全設計:
 
 - `NAB Tap Installer.command` はSenderを起動せず、VST3 / nab-live binary / Sender command / Status command / LiveKit token API を確認できます。`INSTALL` を入力した時だけVST3を再インストールします。
 - `NAB Live Test Tone.command` はREAPER/NAB Tapを使わず、10分間の1kHz/-18dBFS test toneをLiveKitへ送ります。iPhone/browserの実音確認用です。
+- `NAB Live iPhone Check.command` はsenderが動いていなければ一時的にtest toneを開始し、iPhone実機から `Audio OK` proof が届くまで待ちます。このコマンドが自分で始めたtest toneは、確認後に自分で停止します。
 - `NAB Live Sender.command` は既存senderがある場合、二重起動せずPIDと状態だけ表示します。
 - `nab-live` 本体にも room/identity lock と NAB Tap socket lock があります。
 - `kill` / SIGTERM 時も lock/socket を掃除し、再起動時に古いsocketで詰まらないようにしています。
