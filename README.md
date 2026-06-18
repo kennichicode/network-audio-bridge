@@ -194,6 +194,7 @@ Mac miniでの通常手順:
 
 安全設計:
 
+- `NAB Tap Installer.command` はSenderを起動せず、VST3 / nab-live binary / Sender command / Status command / LiveKit token API を確認できます。`INSTALL` を入力した時だけVST3を再インストールします。
 - `NAB Live Sender.command` は既存senderがある場合、二重起動せずPIDと状態だけ表示します。
 - `nab-live` 本体にも room/identity lock と NAB Tap socket lock があります。
 - `kill` / SIGTERM 時も lock/socket を掃除し、再起動時に古いsocketで詰まらないようにしています。
