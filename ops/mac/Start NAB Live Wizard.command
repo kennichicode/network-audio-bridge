@@ -5,10 +5,13 @@ BIN="$HOME/NetworkAudioBridge/nab-live"
 ENV_FILE="$HOME/.config/kenichi-vps/livekit.env"
 
 clear
-echo "NAB Live Wizard"
-echo "==============="
+echo "NAB Live Advanced Wizard"
+echo "========================"
 echo ""
-echo "Use Up/Down and Enter. Choose NAB Tap for REAPER Master."
+echo "Normal concert use: close this and open NAB Live Sender.command instead."
+echo ""
+echo "Use this only when you want to choose a different source, such as CoreAudio."
+echo "If you continue, choose 'REAPER Master Plugin - NAB Tap' for the normal route."
 echo ""
 
 if [[ ! -x "$BIN" ]]; then
@@ -26,7 +29,8 @@ fi
 "$BIN" \
   --env-file "$ENV_FILE" \
   --room "reaper-master" \
-  --identity "nab-live-mac-mini"
+  --identity "nab-live-mac-mini" \
+  --status-file "$HOME/.nab/status.json"
 
 status=$?
 echo ""

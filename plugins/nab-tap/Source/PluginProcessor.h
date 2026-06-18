@@ -30,6 +30,7 @@ public:
     uint64_t getDroppedFrames() const noexcept { return droppedFrames.load(std::memory_order_relaxed); }
     uint64_t getPacketsSent() const noexcept { return packetsSent.load(std::memory_order_relaxed); }
     uint64_t getSocketErrors() const noexcept { return socketErrors.load(std::memory_order_relaxed); }
+    int getLastSocketErrno() const noexcept { return lastSocketErrno.load(std::memory_order_relaxed); }
     uint64_t getAudioCallbacks() const noexcept { return audioCallbacks.load(std::memory_order_relaxed); }
     uint64_t getFramesSeen() const noexcept { return framesSeen.load(std::memory_order_relaxed); }
     bool getSocketReady() const noexcept { return socketReady.load(std::memory_order_relaxed); }
@@ -50,6 +51,7 @@ private:
     std::atomic<uint64_t> droppedFrames { 0 };
     std::atomic<uint64_t> packetsSent { 0 };
     std::atomic<uint64_t> socketErrors { 0 };
+    std::atomic<int> lastSocketErrno { 0 };
     std::atomic<uint64_t> audioCallbacks { 0 };
     std::atomic<uint64_t> framesSeen { 0 };
     std::atomic<uint64_t> sequence { 0 };
@@ -93,6 +95,7 @@ public:
     uint64_t getDroppedFrames() const noexcept { return bridge.getDroppedFrames(); }
     uint64_t getPacketsSent() const noexcept { return bridge.getPacketsSent(); }
     uint64_t getSocketErrors() const noexcept { return bridge.getSocketErrors(); }
+    int getLastSocketErrno() const noexcept { return bridge.getLastSocketErrno(); }
     uint64_t getAudioCallbacks() const noexcept { return bridge.getAudioCallbacks(); }
     uint64_t getFramesSeen() const noexcept { return bridge.getFramesSeen(); }
     bool getSocketReady() const noexcept { return bridge.getSocketReady(); }

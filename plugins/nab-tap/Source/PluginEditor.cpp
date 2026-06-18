@@ -30,15 +30,19 @@ void NabTapAudioProcessorEditor::paint(juce::Graphics& g)
     const auto callbacks = processor.getAudioCallbacks();
     const auto frames = processor.getFramesSeen();
     const auto socketReady = processor.getSocketReady();
+    const auto lastErrno = processor.getLastSocketErrno();
 
-    const auto statusColour = packetsMoving ? juce::Colour(0xff91ffb8)
-                                            : (socketReady ? juce::Colour(0xffffd166)
-                                                           : juce::Colour(0xffff6b6b));
-    const auto statusText = packetsMoving
+    const auto statusColour = errorsMoving ? juce::Colour(0xffffd166)
+                                           : (packetsMoving ? juce::Colour(0xff91ffb8)
+                                                            : (socketReady ? juce::Colour(0xffffd166)
+                                                                           : juce::Colour(0xffff6b6b)));
+    const auto statusText = errorsMoving
+        ? "WARNING - receiver socket is dropping packets"
+        : (packetsMoving
         ? (audioMoving ? "CONNECTED - audio is reaching nab-live"
                        : "CONNECTED - silent standby")
         : (socketReady ? "READY - waiting for first packet"
-                       : "WAITING - open NAB Live Sender.command");
+                       : "WAITING - open NAB Live Sender.command"));
 
     auto statusArea = area.removeFromTop(46);
     g.setColour(statusColour.withAlpha(0.18f));
@@ -62,7 +66,8 @@ void NabTapAudioProcessorEditor::paint(juce::Graphics& g)
                      1);
 
     g.setColour((drops > 0 || errors > 0) ? juce::Colour(0xffff6b6b) : juce::Colour(0xff8a99a8));
-    g.drawFittedText("Dropped frames: " + juce::String(drops) + "   socket errors: " + juce::String(errors),
+    g.drawFittedText("Dropped frames: " + juce::String(drops) + "   socket errors: " + juce::String(errors) +
+                         "   last errno: " + juce::String(lastErrno),
                      area.removeFromTop(22),
                      juce::Justification::left,
                      1);
@@ -80,12 +85,15 @@ void NabTapAudioProcessorEditor::resized()
 void NabTapAudioProcessorEditor::timerCallback()
 {
     const auto packets = processor.getPacketsSent();
+    const auto errors = processor.getSocketErrors();
     const auto callbacks = processor.getAudioCallbacks();
     const auto frames = processor.getFramesSeen();
 
     packetsMoving = packets > lastPackets;
+    errorsMoving = errors > lastErrors;
     audioMoving = callbacks > lastCallbacks || frames > lastFrames;
     lastPackets = packets;
+    lastErrors = errors;
     lastCallbacks = callbacks;
     lastFrames = frames;
 

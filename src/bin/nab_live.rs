@@ -27,10 +27,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -173,6 +175,10 @@ struct Args {
     /// Local capture ring buffer in seconds.
     #[arg(long, default_value_t = 4)]
     ring_buffer_seconds: usize,
+
+    /// JSON status file for external health checks.
+    #[arg(long, default_value = "~/.nab/status.json")]
+    status_file: String,
 }
 
 #[derive(Clone)]
@@ -194,6 +200,7 @@ struct RuntimeInfo {
     livekit_url: String,
     room: String,
     identity: String,
+    status_file: PathBuf,
     input_rate: u32,
     audio_profile: AudioProfileArg,
     bitrate: u64,
@@ -369,6 +376,8 @@ async fn main() -> AppResult<()> {
         "Publish: {} room={} identity={}",
         livekit_url, args.room, args.identity
     );
+    let status_file = expand_tilde(&args.status_file);
+    eprintln!("Status: {}", status_file.display());
 
     let mut pump = AudioPump::new(capture.input_rate)?;
     wait_for_initial_buffer(&mut capture.cons, capture.input_rate).await;
@@ -378,6 +387,7 @@ async fn main() -> AppResult<()> {
         livekit_url: livekit_url.clone(),
         room: args.room.clone(),
         identity: args.identity.clone(),
+        status_file,
         input_rate: capture.input_rate,
         audio_profile: audio_config.profile,
         bitrate: audio_config.bitrate,
@@ -513,6 +523,7 @@ async fn run_livekit_session(
         .connection_state
         .store(CONNECTION_CONNECTED, Ordering::Relaxed);
     eprintln!("Published track SID: {}", publication.sid());
+    let _ = write_status_file(state, runtime);
 
     let loop_result = if use_tui {
         run_status_tui(runtime, pump, cons, &native_source, state, &mut events).await
@@ -947,6 +958,7 @@ fn start_plugin_capture(
 ) -> AppResult<CaptureSetup> {
     let socket_path = prepare_tap_socket_path(socket_path)?;
     let socket = UnixDatagram::bind(&socket_path)?;
+    configure_tap_socket(socket.as_raw_fd());
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
 
     eprintln!(
@@ -1048,6 +1060,20 @@ fn start_plugin_capture(
         }),
         cons,
     })
+}
+
+#[cfg(unix)]
+fn configure_tap_socket(fd: std::os::unix::io::RawFd) {
+    let size: libc::c_int = 4 * 1024 * 1024;
+    unsafe {
+        let _ = libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &size as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&size) as libc::socklen_t,
+        );
+    }
 }
 
 #[cfg(not(unix))]
@@ -1488,6 +1514,7 @@ async fn run_status_tui_inner(
     events: &mut UnboundedReceiver<RoomEvent>,
 ) -> AppResult<LoopExit> {
     let mut draw_tick = tokio::time::interval(Duration::from_millis(100));
+    let mut status_tick = tokio::time::interval(Duration::from_secs(1));
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
     let mut quit_pending = false;
@@ -1527,6 +1554,9 @@ async fn run_status_tui_inner(
                         _ => {}
                     }
                 }
+            }
+            _ = status_tick.tick() => {
+                let _ = write_status_file(state, runtime);
             }
             result = pump.send_next_frame(cons, native_source, state) => {
                 result?;
@@ -1806,6 +1836,117 @@ fn print_status(state: &State, runtime: &RuntimeInfo) {
         livekit_errors,
         reconnects
     );
+    let _ = write_status_file(state, runtime);
+}
+
+fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
+    if let Some(parent) = runtime.status_file.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let connection = connection_label(state.connection_state.load(Ordering::Relaxed));
+    let captured = state.captured_frames.load(Ordering::Relaxed);
+    let sent = state.sent_frames.load(Ordering::Relaxed);
+    let overflow = state.overflow_frames.load(Ordering::Relaxed);
+    let underruns = state.underruns.load(Ordering::Relaxed);
+    let errors = state.capture_errors.load(Ordering::Relaxed);
+    let livekit_errors = state.livekit_errors.load(Ordering::Relaxed);
+    let reconnects = state.reconnects.load(Ordering::Relaxed);
+    let buffer_ms = state.ring_buffer_ms.load(Ordering::Relaxed);
+    let peak_l = state.peak_l_milli.load(Ordering::Relaxed);
+    let peak_r = state.peak_r_milli.load(Ordering::Relaxed);
+    let tap_packets = state.tap_packets.load(Ordering::Relaxed);
+    let tap_gaps = state.tap_seq_gaps.load(Ordering::Relaxed);
+    let tap_drops = state.tap_reported_drops.load(Ordering::Relaxed);
+
+    let body = format!(
+        concat!(
+            "{{\n",
+            "  \"updated_at_unix_ms\": {now_ms},\n",
+            "  \"connection\": {connection},\n",
+            "  \"source\": {source},\n",
+            "  \"livekit_url\": {livekit_url},\n",
+            "  \"listen_url\": \"https://livekit.kenichi-kawabata.com/\",\n",
+            "  \"room\": {room},\n",
+            "  \"identity\": {identity},\n",
+            "  \"track\": \"reaper-master\",\n",
+            "  \"input_rate_hz\": {input_rate},\n",
+            "  \"output_rate_hz\": 48000,\n",
+            "  \"output\": \"48 kHz stereo WebRTC audio\",\n",
+            "  \"profile\": {profile},\n",
+            "  \"bitrate_bps\": {bitrate},\n",
+            "  \"red_enabled\": {red},\n",
+            "  \"dtx_enabled\": {dtx},\n",
+            "  \"livekit_queue_ms\": {queue},\n",
+            "  \"buffer_ms\": {buffer_ms},\n",
+            "  \"captured_frames\": {captured},\n",
+            "  \"sent_frames\": {sent},\n",
+            "  \"tap_packets\": {tap_packets},\n",
+            "  \"tap_sequence_gaps\": {tap_gaps},\n",
+            "  \"plugin_reported_drops\": {tap_drops},\n",
+            "  \"overflow_frames\": {overflow},\n",
+            "  \"underruns\": {underruns},\n",
+            "  \"input_errors\": {errors},\n",
+            "  \"livekit_errors\": {livekit_errors},\n",
+            "  \"reconnects\": {reconnects},\n",
+            "  \"peak_left_milli\": {peak_l},\n",
+            "  \"peak_right_milli\": {peak_r}\n",
+            "}}\n"
+        ),
+        now_ms = now_ms,
+        connection = json_string(connection),
+        source = json_string(&runtime.source_label),
+        livekit_url = json_string(&runtime.livekit_url),
+        room = json_string(&runtime.room),
+        identity = json_string(&runtime.identity),
+        input_rate = runtime.input_rate,
+        profile = json_string(profile_label(runtime.audio_profile)),
+        bitrate = runtime.bitrate,
+        red = runtime.red,
+        dtx = runtime.dtx,
+        queue = runtime.livekit_buffer_ms,
+        buffer_ms = buffer_ms,
+        captured = captured,
+        sent = sent,
+        tap_packets = tap_packets,
+        tap_gaps = tap_gaps,
+        tap_drops = tap_drops,
+        overflow = overflow,
+        underruns = underruns,
+        errors = errors,
+        livekit_errors = livekit_errors,
+        reconnects = reconnects,
+        peak_l = peak_l,
+        peak_r = peak_r,
+    );
+
+    let tmp_path = runtime.status_file.with_extension("json.tmp");
+    fs::write(&tmp_path, body)?;
+    fs::rename(tmp_path, &runtime.status_file)
+}
+
+fn json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => {
+                escaped.push_str(&format!("\\u{:04x}", ch as u32));
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 fn f32_to_i16(sample: f32) -> i16 {

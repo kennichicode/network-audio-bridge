@@ -3,18 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Reaper Master Monitor</title>
+    <title>Reaper Listen</title>
     <style>
       :root {
         color-scheme: dark;
-        --bg: #101416;
-        --panel: #172023;
-        --line: #2d3b40;
-        --text: #edf3f1;
-        --muted: #9fb0ae;
-        --accent: #72d6b0;
-        --warn: #e4b45f;
-        --bad: #ef7a7a;
+        --bg: #0e1113;
+        --band: #161b1f;
+        --line: #303a40;
+        --text: #eef5f2;
+        --muted: #9eaaa7;
+        --accent: #4fd39a;
+        --warn: #e8b957;
+        --bad: #f06f72;
       }
 
       * {
@@ -26,46 +26,46 @@
         min-height: 100vh;
         background: var(--bg);
         color: var(--text);
-        font-family:
-          ui-sans-serif,
-          system-ui,
-          -apple-system,
-          BlinkMacSystemFont,
-          "Segoe UI",
-          sans-serif;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         letter-spacing: 0;
       }
 
       main {
-        width: min(840px, calc(100vw - 32px));
+        width: min(760px, calc(100vw - 32px));
         margin: 0 auto;
-        padding: 40px 0;
+        padding: 28px 0 40px;
       }
 
       header {
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: space-between;
-        gap: 16px;
-        margin-bottom: 24px;
+        gap: 18px;
+        padding: 10px 0 22px;
       }
 
       h1 {
         margin: 0;
-        font-size: clamp(28px, 5vw, 48px);
-        line-height: 1;
-        font-weight: 750;
+        font-size: clamp(34px, 8vw, 68px);
+        line-height: 0.95;
+        font-weight: 800;
       }
 
-      .status {
+      .room {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      .pill {
         display: inline-flex;
         align-items: center;
         gap: 10px;
-        min-height: 40px;
-        padding: 0 14px;
+        min-height: 38px;
+        padding: 0 13px;
         border: 1px solid var(--line);
         border-radius: 6px;
-        background: var(--panel);
+        background: var(--band);
         color: var(--muted);
         white-space: nowrap;
       }
@@ -77,35 +77,46 @@
         background: var(--warn);
       }
 
-      .status.connected .dot {
+      .pill.connected .dot {
         background: var(--accent);
       }
 
-      .status.failed .dot {
+      .pill.failed .dot {
         background: var(--bad);
       }
 
       section {
         border-top: 1px solid var(--line);
-        padding: 24px 0;
+        padding: 22px 0;
       }
 
-      .controls {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-        align-items: center;
+      .join {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 10px;
+      }
+
+      input {
+        min-height: 48px;
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #0b0e10;
+        color: var(--text);
+        font: inherit;
+        font-size: 18px;
+        padding: 0 13px;
       }
 
       button {
+        min-height: 48px;
         border: 0;
         border-radius: 6px;
-        min-height: 44px;
-        padding: 0 18px;
+        padding: 0 22px;
         background: var(--accent);
-        color: #08110f;
+        color: #07100c;
         font: inherit;
-        font-weight: 700;
+        font-weight: 800;
         cursor: pointer;
       }
 
@@ -115,33 +126,85 @@
         border: 1px solid var(--line);
       }
 
+      button:disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+
+      .transport {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
       audio {
         width: 100%;
-        margin-top: 18px;
+        margin-top: 16px;
+      }
+
+      .meters {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .meter {
+        border-top: 1px solid var(--line);
+        padding-top: 12px;
+      }
+
+      .meter b {
+        display: block;
+        font-size: 22px;
+        line-height: 1.1;
+      }
+
+      .meter span {
+        color: var(--muted);
+        font-size: 13px;
       }
 
       pre {
         overflow: auto;
-        min-height: 180px;
+        min-height: 160px;
         margin: 0;
-        padding: 16px;
+        padding: 14px;
         border: 1px solid var(--line);
         border-radius: 6px;
-        background: #0b0f11;
+        background: #080b0d;
         color: var(--muted);
         font-size: 13px;
         line-height: 1.5;
       }
 
-      @media (max-width: 560px) {
-        header {
-          align-items: flex-start;
+      @media (max-width: 620px) {
+        header,
+        .join {
+          grid-template-columns: 1fr;
           flex-direction: column;
         }
 
-        .status {
+        header {
+          display: block;
+        }
+
+        .pill {
+          margin-top: 16px;
           width: 100%;
           justify-content: center;
+        }
+
+        .join {
+          display: grid;
+        }
+
+        button {
+          width: 100%;
+        }
+
+        .meters {
+          grid-template-columns: 1fr;
         }
       }
     </style>
@@ -149,19 +212,35 @@
   <body>
     <main>
       <header>
-        <h1>Reaper Master</h1>
-        <div id="status" class="status">
+        <div>
+          <h1>Reaper Listen</h1>
+          <div class="room">room: reaper-master / source: Mac mini</div>
+        </div>
+        <div id="status" class="pill">
           <span class="dot"></span>
-          <span id="statusText">standby</span>
+          <span id="statusText">locked</span>
         </div>
       </header>
 
       <section>
-        <div class="controls">
-          <button id="connect">Connect</button>
-          <button id="disconnect" class="secondary">Disconnect</button>
+        <form id="joinForm" class="join">
+          <input id="passcode" name="passcode" type="password" autocomplete="off" placeholder="合言葉" />
+          <button id="listen" type="submit">Listen</button>
+        </form>
+      </section>
+
+      <section>
+        <div class="transport">
+          <button id="disconnect" class="secondary" type="button">Disconnect</button>
+          <button id="unlock" class="secondary" type="button">Unlock Audio</button>
         </div>
         <div id="audio"></div>
+      </section>
+
+      <section class="meters">
+        <div class="meter"><b id="publisher">none</b><span>publisher</span></div>
+        <div class="meter"><b id="track">none</b><span>track</span></div>
+        <div class="meter"><b id="quality">unknown</b><span>connection</span></div>
       </section>
 
       <section>
@@ -171,6 +250,7 @@
 
     <script type="module">
       import {
+        ConnectionState,
         Room,
         RoomEvent,
       } from "https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.esm.mjs";
@@ -179,10 +259,17 @@
       const statusText = document.getElementById("statusText");
       const logEl = document.getElementById("log");
       const audioEl = document.getElementById("audio");
-      const connectButton = document.getElementById("connect");
+      const joinForm = document.getElementById("joinForm");
+      const passcodeInput = document.getElementById("passcode");
+      const listenButton = document.getElementById("listen");
       const disconnectButton = document.getElementById("disconnect");
+      const unlockButton = document.getElementById("unlock");
+      const publisherEl = document.getElementById("publisher");
+      const trackEl = document.getElementById("track");
+      const qualityEl = document.getElementById("quality");
 
       let room;
+      let audioNode;
 
       function log(message) {
         const time = new Date().toLocaleTimeString();
@@ -190,58 +277,110 @@
       }
 
       function setStatus(text, kind = "") {
-        statusEl.className = `status ${kind}`;
+        statusEl.className = `pill ${kind}`;
         statusText.textContent = text;
       }
 
-      async function connect() {
+      function resetAudio() {
+        audioEl.replaceChildren();
+        audioNode = undefined;
+        publisherEl.textContent = "none";
+        trackEl.textContent = "none";
+      }
+
+      function attachAudio(track, participant) {
+        if (track.kind !== "audio") return;
+        const element = track.attach();
+        element.controls = true;
+        element.autoplay = true;
+        element.playsInline = true;
+        audioNode = element;
+        audioEl.replaceChildren(element);
+        publisherEl.textContent = participant.identity || "unknown";
+        trackEl.textContent = track.sid || "audio";
+        element.play().catch(() => {
+          setStatus("tap Unlock Audio", "connected");
+          log("audio is connected; tap Unlock Audio if iPhone blocks autoplay");
+        });
+      }
+
+      async function getToken(passcode) {
+        const response = await fetch("/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          body: JSON.stringify({
+            room: "reaper-master",
+            identity: `listener-${Math.random().toString(16).slice(2, 8)}`,
+            passcode,
+          }),
+        });
+        if (response.status === 401) {
+          throw new Error("合言葉が違います");
+        }
+        if (!response.ok) {
+          throw new Error(`token failed: ${response.status}`);
+        }
+        return response.json();
+      }
+
+      async function connect(passcode) {
+        listenButton.disabled = true;
+        setStatus("connecting");
+        qualityEl.textContent = "connecting";
+        resetAudio();
+
         if (room) {
           await room.disconnect();
-          audioEl.replaceChildren();
+          room = undefined;
         }
 
-        setStatus("connecting");
-        const tokenResponse = await fetch("/token?room=reaper-master", {
-          cache: "no-store",
-        });
-        if (!tokenResponse.ok) {
-          throw new Error(`token failed: ${tokenResponse.status}`);
-        }
-        const { url, token, identity } = await tokenResponse.json();
+        const { url, token, identity } = await getToken(passcode);
         room = new Room({ adaptiveStream: false, dynacast: false });
 
         room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
           log(`subscribed ${track.kind} from ${participant.identity}`);
-          if (track.kind === "audio") {
-            const element = track.attach();
-            element.controls = true;
-            element.autoplay = true;
-            audioEl.replaceChildren(element);
-            element.play().catch((err) => log(`play blocked: ${err.message}`));
-          }
+          attachAudio(track, participant);
+          setStatus("listening", "connected");
         });
 
         room.on(RoomEvent.TrackUnsubscribed, (track) => {
           track.detach().forEach((element) => element.remove());
+          resetAudio();
           log(`unsubscribed ${track.kind}`);
+        });
+
+        room.on(RoomEvent.ParticipantConnected, (participant) => {
+          log(`participant ${participant.identity} joined`);
+        });
+
+        room.on(RoomEvent.ConnectionStateChanged, (state) => {
+          qualityEl.textContent = state;
+          if (state === ConnectionState.Connected) {
+            setStatus("waiting for audio", "connected");
+          }
         });
 
         room.on(RoomEvent.Disconnected, (reason) => {
           setStatus("disconnected");
+          qualityEl.textContent = "disconnected";
           log(`disconnected ${reason || ""}`.trim());
         });
 
         await room.connect(url, token, { autoSubscribe: true });
-        setStatus("connected", "connected");
         log(`connected as ${identity}`);
+        listenButton.disabled = false;
       }
 
-      connectButton.addEventListener("click", async () => {
+      joinForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
         try {
-          await connect();
+          await connect(passcodeInput.value);
         } catch (err) {
+          listenButton.disabled = false;
           setStatus("failed", "failed");
-          log(err.stack || err.message || String(err));
+          qualityEl.textContent = "failed";
+          log(err.message || String(err));
         }
       });
 
@@ -250,8 +389,22 @@
           await room.disconnect();
           room = undefined;
         }
-        audioEl.replaceChildren();
-        setStatus("standby");
+        resetAudio();
+        setStatus("locked");
+        qualityEl.textContent = "unknown";
+      });
+
+      unlockButton.addEventListener("click", async () => {
+        if (!audioNode) {
+          log("no audio track yet");
+          return;
+        }
+        try {
+          await audioNode.play();
+          setStatus("listening", "connected");
+        } catch (err) {
+          log(err.message || String(err));
+        }
       });
     </script>
   </body>

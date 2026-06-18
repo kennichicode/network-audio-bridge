@@ -24,6 +24,7 @@ constexpr uint16_t kTapChannels = 2;
 constexpr size_t kFramesPerPacket = 240;
 constexpr size_t kMaxBlockSize = 16384;
 constexpr size_t kMaxRingSeconds = 4;
+constexpr int kSocketBufferBytes = 4 * 1024 * 1024;
 
 #pragma pack(push, 1)
 struct TapPacketHeader
@@ -79,6 +80,15 @@ bool isSocketPath(const std::string& path) noexcept
 {
     struct stat info {};
     return ::lstat(path.c_str(), &info) == 0 && S_ISSOCK(info.st_mode);
+}
+
+void configureSocketBuffer(int fd) noexcept
+{
+    if (fd < 0)
+        return;
+
+    int size = kSocketBufferBytes;
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size));
 }
 }
 
@@ -261,8 +271,19 @@ void NabTapBridge::run()
         }
         else
         {
+            const auto err = errno;
+            lastSocketErrno.store(err, std::memory_order_relaxed);
             socketErrors.fetch_add(1, std::memory_order_relaxed);
-            if (errno == ENOENT || errno == ECONNREFUSED || errno == EBADF)
+            droppedFrames.fetch_add(frames, std::memory_order_relaxed);
+
+            if (err == EAGAIN || err == EWOULDBLOCK || err == ENOBUFS)
+            {
+                socketReady.store(true, std::memory_order_relaxed);
+                wait(2);
+                continue;
+            }
+
+            if (err == ENOENT || err == ECONNREFUSED || err == EBADF)
                 resetSocket();
             socketReady.store(false, std::memory_order_relaxed);
             receiverWasMissing = true;
@@ -288,9 +309,12 @@ bool NabTapBridge::ensureSocket()
     socketFd = ::socket(AF_UNIX, SOCK_DGRAM, 0);
     if (socketFd < 0)
     {
+        lastSocketErrno.store(errno, std::memory_order_relaxed);
         socketErrors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+
+    configureSocketBuffer(socketFd);
 
     const auto flags = ::fcntl(socketFd, F_GETFL, 0);
     if (flags >= 0)

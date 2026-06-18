@@ -21,6 +21,12 @@ const env = Object.fromEntries(
 const apiKey = env.LIVEKIT_API_KEY;
 const apiSecret = env.LIVEKIT_API_SECRET;
 const defaultRoom = env.LIVEKIT_ROOM || "reaper-master";
+const listenPasscode = process.env.LIVEKIT_LISTEN_PASSCODE || env.LIVEKIT_LISTEN_PASSCODE || "";
+
+if (!listenPasscode) {
+  console.error("LIVEKIT_LISTEN_PASSCODE is required");
+  process.exit(1);
+}
 
 function b64url(input) {
   return Buffer.from(input)
@@ -52,29 +58,97 @@ function signToken({ room, identity }) {
   return `${unsigned}.${sig}`;
 }
 
-const server = http.createServer((req, res) => {
+function json(res, status, body) {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 4096) {
+        reject(new Error("body_too_large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      if (!body) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(body));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a || ""));
+  const right = Buffer.from(String(b || ""));
+  if (left.length !== right.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(left, right);
+}
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
-  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Cache-Control", "no-store");
 
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    });
+    res.end();
+    return;
+  }
+
   if (url.pathname === "/healthz") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
+    json(res, 200, { ok: true });
     return;
   }
 
   if (url.pathname !== "/token") {
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "not_found" }));
+    json(res, 404, { error: "not_found" });
     return;
   }
 
-  const room = url.searchParams.get("room") || defaultRoom;
+  if (req.method !== "POST") {
+    json(res, 405, { error: "method_not_allowed" });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readJson(req);
+  } catch (err) {
+    json(res, 400, { error: "bad_json" });
+    return;
+  }
+
+  if (!safeEqual(body.passcode, listenPasscode)) {
+    json(res, 401, { error: "bad_passcode" });
+    return;
+  }
+
+  const room = body.room || defaultRoom;
+  if (room !== defaultRoom) {
+    json(res, 403, { error: "room_not_allowed" });
+    return;
+  }
+
   const suffix = crypto.randomBytes(4).toString("hex");
-  const identity = url.searchParams.get("identity") || `listener-${suffix}`;
+  const requestedIdentity = String(body.identity || "").replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 32);
+  const identity = requestedIdentity || `listener-${suffix}`;
   const token = signToken({ room, identity });
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ url: env.LIVEKIT_URL, room, identity, token }));
+  json(res, 200, { url: env.LIVEKIT_URL, room, identity, token });
 });
 
 server.listen(8094, "127.0.0.1", () => {

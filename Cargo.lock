@@ -1911,6 +1911,7 @@ dependencies = [
  "cpal",
  "crossterm",
  "if-addrs",
+ "libc",
  "livekit",
  "livekit-api",
  "ratatui",
