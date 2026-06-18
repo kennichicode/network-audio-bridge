@@ -1,5 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:${PATH:-}"
+path=(/usr/bin /bin /usr/sbin /sbin /opt/homebrew/bin $path)
+hash -r
 
 BIN="$HOME/NetworkAudioBridge/nab-live"
 TEST_TONE="$HOME/Desktop/NAB Live Test Tone.command"

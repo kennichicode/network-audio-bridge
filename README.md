@@ -201,12 +201,21 @@ REAPERなしでiPhone/browserだけ確認したい時:
 
 ブラウザだけで確認したい時は `NAB Live Test Tone.command` を開き、ブラウザでListenしたあと `NAB Live Status.command` の `ListenerProof: ... / Audio OK` を見ます。
 
+REAPER/NAB Tap経路だけを診断したい時:
+
+1. REAPERを起動し、Master FXまたはMonitor FXに `VST3: NAB Tap (Kenichi Kawabata)` を挿す。
+2. `NAB Live REAPER Selftest.command` を開く。
+3. コマンドの `REAPER selftest result` と `NAB Live Status.command` 出力で、VST3 packets / captured / sent / RTP packets が増えることを見る。
+
+この診断は一時テストトラックを作って削除しますが、REAPERのプロジェクトがmodified表示になることがあります。本番プロジェクトで実行した場合、selftest後に保存しないで閉じるか、必要に応じてUndoしてください。
+
 安全設計:
 
 - `NAB Tap Installer.command` はSenderを起動せず、VST3 / nab-live binary / Sender command / Status command / LiveKit token API を確認できます。`INSTALL` を入力した時だけVST3を再インストールします。
 - `NAB Live Test Tone.command` はREAPER/NAB Tapを使わず、10分間の1kHz/-18dBFS test toneをLiveKitへ送ります。iPhone/browserの実音確認用です。
 - `NAB Live iPhone Check.command` はsenderが動いていなければ一時的にtest toneを開始し、iPhone実機から `Audio OK` proof が届くまで待ちます。このコマンドが自分で始めたtest toneは、確認後に自分で停止します。
 - `NAB Live RME Preflight.command` は音を流さず、RME Web UI、AVB 16ch/96kHz、REAPER起動、REAPER内のNAB Tapロード状態を確認します。これは12Mic実音確認の前提チェックであり、実音が聞こえた証明ではありません。
+- `NAB Live REAPER Selftest.command` はREAPER内で短いtest toneを作り、NAB Tap -> nab-live -> LiveKit経路を確認します。12Mic本体の実音確認ではありません。
 - `NAB Live Sender.command` は既存senderがある場合、二重起動せずPIDと状態だけ表示します。
 - `nab-live` 本体にも room/identity lock と NAB Tap socket lock があります。
 - `kill` / SIGTERM 時も lock/socket を掃除し、再起動時に古いsocketで詰まらないようにしています。

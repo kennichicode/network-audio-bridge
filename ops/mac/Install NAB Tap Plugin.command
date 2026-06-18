@@ -1,5 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:${PATH:-}"
+path=(/usr/bin /bin /usr/sbin /sbin /opt/homebrew/bin $path)
+hash -r
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$HOME/NetworkAudioBridge"
@@ -12,6 +15,7 @@ STATUS="$HOME/Desktop/NAB Live Status.command"
 TEST_TONE="$HOME/Desktop/NAB Live Test Tone.command"
 IPHONE_CHECK="$HOME/Desktop/NAB Live iPhone Check.command"
 RME_PREFLIGHT="$HOME/Desktop/NAB Live RME Preflight.command"
+REAPER_SELFTEST="$HOME/Desktop/NAB Live REAPER Selftest.command"
 TOKEN_HEALTH_URL="https://livekit.kenichi-kawabata.com/healthz"
 
 ok_line() {
@@ -64,6 +68,11 @@ check_install() {
     ok_line "RME preflight command: $RME_PREFLIGHT"
   else
     ng_line "RME preflight command missing: $RME_PREFLIGHT"
+  fi
+  if [[ -x "$REAPER_SELFTEST" ]]; then
+    ok_line "REAPER selftest command: $REAPER_SELFTEST"
+  else
+    ng_line "REAPER selftest command missing: $REAPER_SELFTEST"
   fi
   if [[ -f "$ENV_FILE" ]]; then
     ok_line "LiveKit env file: $ENV_FILE"
