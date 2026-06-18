@@ -314,6 +314,10 @@
       let statsTimer;
       let lastStats;
       let playBlocked = false;
+      let listenerIdentity;
+      let listenerProofKey;
+      let lastProofSentAt = 0;
+      let lastProofText = "";
 
       function log(message) {
         const time = new Date().toLocaleTimeString();
@@ -366,6 +370,37 @@
         levelEl.textContent = "unknown";
         jitterEl.textContent = "unknown";
         lossEl.textContent = "unknown";
+      }
+
+      function sendListenProof(metrics = {}) {
+        if (!listenerIdentity || !listenerProofKey) return;
+        const now = Date.now();
+        const proof = proofEl.textContent || "";
+        if (now - lastProofSentAt < 5000 && proof === lastProofText) return;
+        lastProofSentAt = now;
+        lastProofText = proof;
+        fetch("/proof", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          cache: "no-store",
+          keepalive: true,
+          body: JSON.stringify({
+            identity: listenerIdentity,
+            proofKey: listenerProofKey,
+            proof,
+            status: statusText.textContent,
+            player: playerEl.textContent,
+            publisher: publisherEl.textContent,
+            track: trackEl.textContent,
+            packets: metrics.packets,
+            bytes: metrics.bytes,
+            packetDelta: packetDeltaEl.textContent,
+            byteDelta: byteDeltaEl.textContent,
+            level: levelEl.textContent,
+            jitter: jitterEl.textContent,
+            loss: metrics.lost,
+          }),
+        }).catch(() => {});
       }
 
       function formatBytes(value) {
@@ -460,6 +495,7 @@
             setStatus("no audio frames");
           }
 
+          sendListenProof({ packets, bytes, lost });
           lastStats = { at: now, packets, bytes };
         } catch (err) {
           log(`stats unavailable: ${err.message || String(err)}`);
@@ -555,7 +591,11 @@
         }
 
         await unlockAudioGesture().catch(() => {});
-        const { url, token, identity, expiresInSeconds, permissions } = await getToken(passcode);
+        const { url, token, identity, expiresInSeconds, permissions, proofKey } = await getToken(passcode);
+        listenerIdentity = identity;
+        listenerProofKey = proofKey;
+        lastProofSentAt = 0;
+        lastProofText = "";
         setListenerMode(permissions);
         room = new Room({ adaptiveStream: false, dynacast: false });
 
@@ -637,6 +677,8 @@
         listenerModeEl.textContent = "locked";
         listenerModeEl.className = "";
         listenerModeDetailEl.textContent = "not connected";
+        listenerIdentity = undefined;
+        listenerProofKey = undefined;
       });
 
       unlockButton.addEventListener("click", async () => {

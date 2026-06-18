@@ -37,6 +37,8 @@ const allowedOrigins = String(
 const rateWindowMs = 60 * 1000;
 const maxTokenRequestsPerWindow = 20;
 const rateBuckets = new Map();
+const proofSessions = new Map();
+const listenerProofs = new Map();
 
 if (!listenPasscode) {
   console.error("LIVEKIT_LISTEN_PASSCODE is required");
@@ -149,6 +151,44 @@ function rateLimitToken(req) {
   return bucket.count <= maxTokenRequestsPerWindow;
 }
 
+function cleanupProofs() {
+  const now = Date.now();
+  for (const [identity, session] of proofSessions) {
+    if (session.expiresAt <= now) {
+      proofSessions.delete(identity);
+      listenerProofs.delete(identity);
+    }
+  }
+}
+
+function cleanText(value, maxLength = 80) {
+  return String(value || "")
+    .replace(/[^\p{L}\p{N}\s/:+._=-]/gu, "")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function cleanNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function deviceLabel(userAgent) {
+  const ua = String(userAgent || "");
+  if (/iPhone/i.test(ua)) return "iPhone";
+  if (/iPad/i.test(ua)) return "iPad";
+  if (/Android/i.test(ua)) return "Android";
+  if (/Macintosh/i.test(ua)) return "Mac browser";
+  if (/Windows/i.test(ua)) return "Windows browser";
+  return "browser";
+}
+
+function isLocalRequest(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "");
+  const remote = req.socket.remoteAddress || "";
+  return !forwarded && (remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1");
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   res.setHeader("Cache-Control", "no-store");
@@ -169,12 +209,94 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/healthz") {
+    cleanupProofs();
+    const proofs = Array.from(listenerProofs.values());
+    const lastProof = proofs.sort((a, b) => b.atUnixMs - a.atUnixMs)[0];
     json(res, 200, {
       ok: true,
       room: defaultRoom,
       ttlSeconds: tokenTtlSeconds,
       security: "passcode + subscribe-only listener token",
+      proofCount: proofs.length,
+      lastProof: lastProof
+        ? {
+            ageSeconds: Math.round((Date.now() - lastProof.atUnixMs) / 1000),
+            device: lastProof.device,
+            proof: lastProof.proof,
+            player: lastProof.player,
+            track: lastProof.track,
+            packets: lastProof.packets,
+            bytes: lastProof.bytes,
+            level: lastProof.level,
+            loss: lastProof.loss,
+          }
+        : null,
     });
+    return;
+  }
+
+  if (url.pathname === "/proofs") {
+    cleanupProofs();
+    if (!isLocalRequest(req)) {
+      json(res, 403, { error: "local_only" });
+      return;
+    }
+    json(res, 200, {
+      ok: true,
+      proofs: Array.from(listenerProofs.values()).map((proof) => ({
+        ...proof,
+        ageSeconds: Math.round((Date.now() - proof.atUnixMs) / 1000),
+      })),
+    });
+    return;
+  }
+
+  if (url.pathname === "/proof") {
+    cleanupProofs();
+    if (req.method !== "POST") {
+      json(res, 405, { error: "method_not_allowed" });
+      return;
+    }
+
+    let body;
+    try {
+      body = await readJson(req);
+    } catch (err) {
+      json(res, 400, { error: "bad_json" });
+      return;
+    }
+
+    const identity = String(body.identity || "").replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 36);
+    const proofKey = String(body.proofKey || "");
+    const session = proofSessions.get(identity);
+    if (!session || session.expiresAt <= Date.now() || !safeEqual(proofKey, session.proofKey)) {
+      json(res, 403, { error: "proof_not_allowed" });
+      return;
+    }
+
+    const proof = {
+      atUnixMs: Date.now(),
+      identity,
+      room: session.room,
+      device: deviceLabel(req.headers["user-agent"]),
+      proof: cleanText(body.proof),
+      status: cleanText(body.status),
+      player: cleanText(body.player),
+      publisher: cleanText(body.publisher),
+      track: cleanText(body.track),
+      packets: cleanNumber(body.packets),
+      bytes: cleanNumber(body.bytes),
+      packetDelta: cleanText(body.packetDelta, 32),
+      byteDelta: cleanText(body.byteDelta, 32),
+      level: cleanText(body.level, 32),
+      jitter: cleanText(body.jitter, 32),
+      loss: cleanNumber(body.loss),
+    };
+    listenerProofs.set(identity, proof);
+    console.log(
+      `listener proof identity=${identity} device=${proof.device} proof=${proof.proof} player=${proof.player} packets=${proof.packets} bytes=${proof.bytes}`,
+    );
+    json(res, 200, { ok: true });
     return;
   }
 
@@ -218,12 +340,19 @@ const server = http.createServer(async (req, res) => {
     ? requestedIdentity
     : `listener-${requestedIdentity || suffix}`.slice(0, 36);
   const token = signToken({ room, identity });
+  const proofKey = crypto.randomBytes(16).toString("hex");
+  proofSessions.set(identity, {
+    proofKey,
+    room,
+    expiresAt: Date.now() + tokenTtlSeconds * 1000,
+  });
   json(res, 200, {
     url: env.LIVEKIT_URL,
     room,
     identity,
     expiresInSeconds: tokenTtlSeconds,
     permissions: { canPublish: false, canSubscribe: true },
+    proofKey,
     token,
   });
 });

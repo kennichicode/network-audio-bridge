@@ -88,6 +88,43 @@ PY
   fi
 }
 
+print_token_health() {
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "Token API  : unknown (curl missing)"
+    return
+  fi
+
+  local body
+  body="$(curl -fsS --max-time 5 "$TOKEN_HEALTH_URL" 2>/dev/null || true)"
+  if [[ -z "$body" ]]; then
+    echo "Token API  : failed ($TOKEN_HEALTH_URL)"
+    return
+  fi
+
+  python3 - "$TOKEN_HEALTH_URL" "$body" <<'PY' 2>/dev/null || echo "Token API  : 200 ($TOKEN_HEALTH_URL)"
+import json
+import sys
+
+url = sys.argv[1]
+data = json.loads(sys.argv[2])
+print(f"Token API  : {'200' if data.get('ok') else 'not ok'} ({url})")
+last = data.get("lastProof")
+if last:
+    age = last.get("ageSeconds", "unknown")
+    device = last.get("device") or "browser"
+    proof = last.get("proof") or "unknown"
+    player = last.get("player") or "unknown"
+    track = last.get("track") or "unknown"
+    packets = last.get("packets", 0)
+    level = last.get("level", "unknown")
+    loss = last.get("loss", "unknown")
+    print(f"ListenerProof: {device} / {proof} / {player} / age={age}s")
+    print(f"  track={track} packets={packets} level={level} loss={loss}")
+else:
+    print("ListenerProof: none yet")
+PY
+}
+
 pids="$(sender_pids)"
 if [[ -z "$pids" ]]; then
   echo "NAB Live Sender is NOT running."
@@ -139,12 +176,7 @@ if (( ${#runtime_locks[@]} > 0 )); then
 else
   echo "RuntimeLock: missing ($RUNTIME_LOCK_DIR)"
 fi
-if command -v curl >/dev/null 2>&1; then
-  token_code="$(curl -s -o /dev/null -w "%{http_code}" "$TOKEN_HEALTH_URL" 2>/dev/null || true)"
-  echo "Token API  : ${token_code:-unknown} ($TOKEN_HEALTH_URL)"
-else
-  echo "Token API  : unknown (curl missing)"
-fi
+print_token_health
 echo ""
 
 if [[ ! -f "$STATUS_FILE" ]]; then

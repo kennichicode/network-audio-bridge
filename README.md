@@ -190,13 +190,13 @@ Mac miniでの通常手順:
 3. `NAB Live Sender.command` を開いたままにする。
 4. `NAB Live Status.command` で RTP packets/bytes が増えることを見る。
 5. ブラウザで `https://livekit.kenichi-kawabata.com/` を開き、数字の合言葉で `Listen`。
-6. listener接続後、`NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` を見る。
+6. listener接続後、`NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` と `ListenerProof: ... / Audio OK` を見る。
 
 REAPERなしでiPhone/browserだけ確認したい時:
 
 1. `NAB Live Test Tone.command` を開く。
 2. iPhone/browserで `https://livekit.kenichi-kawabata.com/` を開き、`Listen`。
-3. `NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` を見る。
+3. `NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` と `ListenerProof: ... / Audio OK` を見る。
 
 安全設計:
 
@@ -207,6 +207,7 @@ REAPERなしでiPhone/browserだけ確認したい時:
 - `kill` / SIGTERM 時も lock/socket を掃除し、再起動時に古いsocketで詰まらないようにしています。
 - `NAB Live Status.command` は接続だけでなく、2秒間の `tap_packets` / `captured_frames` / `sent_frames` / RTP packets / RTP bytes / RMS / peak の増加を見ます。
 - `NAB Live Status.command` は `subscriber_count` と `listener_identities` を表示します。listenerがいない場合は「LiveKitには届いているがlistenerなし」と分けて表示します。
+- listen pageは、短寿命のproof keyで `Audio OK` / player state / packets / bytes をVPSへ送ります。`NAB Live Status.command` は最新の `ListenerProof` を表示するので、iPhone実機でListenした時に `iPhone / Audio OK` まで確認できます。
 - `NAB Live Status.command` は `VST3 connected`、`frames_dropped_total`、`last_error`、ログファイルパスも表示します。
 - `https://livekit.kenichi-kawabata.com/` は購読専用ページです。listener token は `canPublish=false`, `canSubscribe=true`, 短寿命TTLです。
 - listen pageは受信packet/bytes/jitter/audio level/audio element状態を表示します。
