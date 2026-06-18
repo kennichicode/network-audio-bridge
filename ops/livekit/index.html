@@ -172,6 +172,18 @@
         font-size: 12px;
       }
 
+      .state-good {
+        color: var(--accent);
+      }
+
+      .state-warn {
+        color: var(--warn);
+      }
+
+      .state-bad {
+        color: var(--bad);
+      }
+
       pre {
         overflow: auto;
         min-height: 160px;
@@ -245,6 +257,8 @@
       </section>
 
       <section class="meters">
+        <div class="meter"><b id="proof">locked</b><span>listen proof</span><small id="proofDetail">Press Listen</small></div>
+        <div class="meter"><b id="listenerMode">locked</b><span>token mode</span><small id="listenerModeDetail">not connected</small></div>
         <div class="meter"><b id="publisher">none</b><span>publisher</span></div>
         <div class="meter"><b id="track">none</b><span>track</span></div>
         <div class="meter"><b id="quality">unknown</b><span>connection</span></div>
@@ -277,6 +291,10 @@
       const listenButton = document.getElementById("listen");
       const disconnectButton = document.getElementById("disconnect");
       const unlockButton = document.getElementById("unlock");
+      const proofEl = document.getElementById("proof");
+      const proofDetailEl = document.getElementById("proofDetail");
+      const listenerModeEl = document.getElementById("listenerMode");
+      const listenerModeDetailEl = document.getElementById("listenerModeDetail");
       const publisherEl = document.getElementById("publisher");
       const trackEl = document.getElementById("track");
       const qualityEl = document.getElementById("quality");
@@ -307,12 +325,37 @@
         statusText.textContent = text;
       }
 
+      function setProof(text, detail, kind = "") {
+        proofEl.textContent = text;
+        proofEl.className = kind;
+        proofDetailEl.textContent = detail;
+      }
+
+      function setListenerMode(permissions) {
+        const canPublish = permissions?.canPublish === true;
+        const canSubscribe = permissions?.canSubscribe !== false;
+        if (!canPublish && canSubscribe) {
+          listenerModeEl.textContent = "subscribe-only";
+          listenerModeEl.className = "state-good";
+          listenerModeDetailEl.textContent = "canSubscribe=true / canPublish=false";
+        } else if (canPublish) {
+          listenerModeEl.textContent = "publish enabled";
+          listenerModeEl.className = "state-bad";
+          listenerModeDetailEl.textContent = "listener token can publish";
+        } else {
+          listenerModeEl.textContent = "unknown";
+          listenerModeEl.className = "state-warn";
+          listenerModeDetailEl.textContent = "token permission not confirmed";
+        }
+      }
+
       function resetAudio() {
         stopStats();
         audioEl.replaceChildren();
         audioNode = undefined;
         currentAudioTrack = undefined;
         playBlocked = false;
+        setProof("no audio", "waiting for subscribed audio track", "state-warn");
         publisherEl.textContent = "none";
         trackEl.textContent = "none";
         playerEl.textContent = "none";
@@ -385,11 +428,15 @@
           const elapsedSeconds = lastStats ? Math.max(0.1, (now - lastStats.at) / 1000) : 1;
           const packetDelta = lastStats ? packets - lastStats.packets : 0;
           const byteDelta = lastStats ? bytes - lastStats.bytes : 0;
+          const packetsPerSecond = Math.max(0, Math.round(packetDelta / elapsedSeconds));
+          const bytesPerSecond = Math.max(0, Math.round(byteDelta / elapsedSeconds));
+          const receivingAudio = packetDelta > 0 || byteDelta > 0;
+          const playerReady = audioNode && !audioNode.paused && !audioNode.muted && !playBlocked;
 
           packetsEl.textContent = String(packets);
-          packetDeltaEl.textContent = `+${Math.max(0, Math.round(packetDelta / elapsedSeconds))}/s`;
+          packetDeltaEl.textContent = `+${packetsPerSecond}/s`;
           bytesEl.textContent = formatBytes(bytes);
-          byteDeltaEl.textContent = `+${formatBytes(Math.max(0, Math.round(byteDelta / elapsedSeconds)))}/s`;
+          byteDeltaEl.textContent = `+${formatBytes(bytesPerSecond)}/s`;
           lossEl.textContent = Number.isFinite(lost) ? String(lost) : "unknown";
           jitterEl.textContent = Number.isFinite(jitterSeconds)
             ? `${(jitterSeconds * 1000).toFixed(1)} ms`
@@ -399,11 +446,17 @@
             : "unknown";
           updatePlayerState();
 
-          if (packetDelta > 0 && audioNode && !audioNode.paused && !playBlocked) {
+          if (receivingAudio && playerReady) {
+            setProof("Audio OK", `receiving +${packetsPerSecond} pkt/s, +${formatBytes(bytesPerSecond)}/s`, "state-good");
             setStatus("audio playing", "connected");
-          } else if (packetDelta > 0) {
+          } else if (receivingAudio && playBlocked) {
+            setProof("Unlock needed", "packets are arriving, but browser blocked playback", "state-warn");
+            setStatus("tap Unlock Audio", "connected");
+          } else if (receivingAudio) {
+            setProof("Packets OK", "audio packets are arriving; player is not playing yet", "state-warn");
             setStatus("track subscribed", "connected");
           } else if (lastStats && room?.state === ConnectionState.Connected) {
+            setProof("No packets", "connected, but inbound audio counters did not move", "state-bad");
             setStatus("no audio frames");
           }
 
@@ -441,6 +494,7 @@
         audioEl.replaceChildren(element);
         publisherEl.textContent = participant.identity || "unknown";
         trackEl.textContent = track.sid || "audio";
+        setProof("track attached", "waiting for inbound packet movement", "state-warn");
         startStats(track);
         element.addEventListener("playing", () => {
           playBlocked = false;
@@ -448,9 +502,16 @@
           setStatus("audio playing", "connected");
         });
         element.addEventListener("pause", updatePlayerState);
-        element.addEventListener("waiting", () => setStatus("audio waiting"));
-        element.addEventListener("stalled", () => setStatus("audio stalled"));
+        element.addEventListener("waiting", () => {
+          setProof("Waiting", "audio element is buffering", "state-warn");
+          setStatus("audio waiting");
+        });
+        element.addEventListener("stalled", () => {
+          setProof("Stalled", "browser audio element stalled", "state-bad");
+          setStatus("audio stalled");
+        });
         element.addEventListener("error", () => {
+          setProof("Audio error", "browser audio element reported an error", "state-bad");
           setStatus("audio error", "failed");
           log("audio element error");
         });
@@ -495,6 +556,7 @@
 
         await unlockAudioGesture().catch(() => {});
         const { url, token, identity, expiresInSeconds, permissions } = await getToken(passcode);
+        setListenerMode(permissions);
         room = new Room({ adaptiveStream: false, dynacast: false });
 
         room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
@@ -542,8 +604,13 @@
         });
 
         await room.connect(url, token, { autoSubscribe: true });
-        const canPublish = room.localParticipant?.permissions?.canPublish ?? permissions?.canPublish;
-        log(`connected as ${identity}; token expires in ${expiresInSeconds || "unknown"}s; canPublish=${canPublish === true ? "true" : "false"}`);
+        const roomPermissions = room.localParticipant?.permissions || permissions;
+        setListenerMode(roomPermissions);
+        const canPublish = roomPermissions?.canPublish === true;
+        if (canPublish) {
+          log("WARNING: listener token can publish; expected subscribe-only");
+        }
+        log(`connected as ${identity}; token expires in ${expiresInSeconds || "unknown"}s; canPublish=${canPublish ? "true" : "false"}`);
         listenButton.disabled = false;
       }
 
@@ -567,6 +634,9 @@
         resetAudio();
         setStatus("locked");
         qualityEl.textContent = "unknown";
+        listenerModeEl.textContent = "locked";
+        listenerModeEl.className = "";
+        listenerModeDetailEl.textContent = "not connected";
       });
 
       unlockButton.addEventListener("click", async () => {
@@ -579,6 +649,7 @@
           await audioNode.play();
           playBlocked = false;
           updatePlayerState();
+          setProof("Playback unlocked", "waiting for inbound packet movement", "state-warn");
           setStatus("listening", "connected");
         } catch (err) {
           playBlocked = true;
