@@ -199,6 +199,7 @@ Mac miniでの通常手順:
 - `kill` / SIGTERM 時も lock/socket を掃除し、再起動時に古いsocketで詰まらないようにしています。
 - `NAB Live Status.command` は接続だけでなく、2秒間の `tap_packets` / `captured_frames` / `sent_frames` / RTP packets / RTP bytes / RMS / peak の増加を見ます。
 - `NAB Live Status.command` は `subscriber_count` と `listener_identities` を表示します。listenerがいない場合は「LiveKitには届いているがlistenerなし」と分けて表示します。
+- `NAB Live Status.command` は `VST3 connected`、`frames_dropped_total`、`last_error`、ログファイルパスも表示します。
 - `https://livekit.kenichi-kawabata.com/` は購読専用ページです。listener token は `canPublish=false`, `canSubscribe=true`, 短寿命TTLです。
 - listen pageは受信packet/bytes/jitter/audio level/audio element状態を表示します。
 

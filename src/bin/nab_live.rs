@@ -236,6 +236,7 @@ struct RuntimeInfo {
     room: String,
     identity: String,
     status_file: PathBuf,
+    log_path: PathBuf,
     input_rate: u32,
     audio_profile: AudioProfileArg,
     bitrate: u64,
@@ -302,6 +303,7 @@ struct State {
     subscriber_count: AtomicUsize,
     listener_identities: Mutex<HashSet<String>>,
     published_track_sid: Mutex<String>,
+    last_error: Mutex<String>,
 }
 
 struct CaptureSetup {
@@ -506,6 +508,7 @@ async fn main() -> AppResult<()> {
         room: args.room.clone(),
         identity: args.identity.clone(),
         status_file,
+        log_path: log::path().unwrap_or_else(|| expand_tilde("~/.nab/log.txt")),
         input_rate: capture.input_rate,
         audio_profile: audio_config.profile,
         bitrate: audio_config.bitrate,
@@ -569,6 +572,7 @@ async fn run_livekit_supervisor(
             }
             Err(err) if config.reconnect => {
                 state.livekit_errors.fetch_add(1, Ordering::Relaxed);
+                set_last_error(state, format!("LiveKit error: {err}"));
                 state
                     .connection_state
                     .store(CONNECTION_DISCONNECTED, Ordering::Relaxed);
@@ -639,6 +643,7 @@ async fn run_livekit_session(
         .await?;
     let publication_sid = publication.sid().clone();
     reset_livekit_session_stats(state);
+    clear_last_error(state);
     set_published_track_sid(state, publication.sid().as_str());
     sync_listener_identities(
         state,
@@ -762,6 +767,7 @@ fn handle_room_event(event: RoomEvent, state: &State) -> bool {
                 .connection_state
                 .store(CONNECTION_DISCONNECTED, Ordering::Relaxed);
             sync_listener_identities(state, std::iter::empty::<String>());
+            set_last_error(state, format!("LiveKit disconnected: {reason:?}"));
             log::log(&format!("LiveKit disconnected: {reason:?}"));
             true
         }
@@ -855,6 +861,7 @@ async fn refresh_local_track_stats(local_track: &LocalAudioTrack, state: &State)
         }
         Err(err) => {
             state.rtp_stats_errors.fetch_add(1, Ordering::Relaxed);
+            set_last_error(state, format!("LiveKit stats error: {err}"));
             log::log(&format!("LiveKit stats error: {err}"));
             Err(err.into())
         }
@@ -948,6 +955,31 @@ fn listener_identities_snapshot(state: &State) -> Vec<String> {
         .collect();
     identities.sort();
     identities
+}
+
+fn set_last_error(state: &State, message: impl AsRef<str>) {
+    let mut last_error = state
+        .last_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    last_error.clear();
+    last_error.push_str(message.as_ref());
+}
+
+fn clear_last_error(state: &State) {
+    let mut last_error = state
+        .last_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    last_error.clear();
+}
+
+fn last_error_snapshot(state: &State) -> String {
+    state
+        .last_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 fn should_show_wizard(args: &Args) -> bool {
@@ -1372,6 +1404,7 @@ fn start_plugin_capture(
                 }
                 Err(err) => {
                     state.capture_errors.fetch_add(1, Ordering::Relaxed);
+                    set_last_error(&state, format!("tap packet ignored: {err}"));
                     log::log(&format!("tap packet ignored: {err}"));
                 }
             },
@@ -1416,6 +1449,13 @@ fn start_plugin_capture(
                     Ok(packet) => {
                         if packet.sample_rate != input_rate {
                             state_thread.capture_errors.fetch_add(1, Ordering::Relaxed);
+                            set_last_error(
+                                &state_thread,
+                                format!(
+                                    "tap sample rate changed from {input_rate} to {}",
+                                    packet.sample_rate
+                                ),
+                            );
                             log::log(&format!(
                                 "tap packet ignored: sample rate changed from {input_rate} to {}",
                                 packet.sample_rate
@@ -1430,6 +1470,7 @@ fn start_plugin_capture(
                     }
                     Err(err) => {
                         state_thread.capture_errors.fetch_add(1, Ordering::Relaxed);
+                        set_last_error(&state_thread, format!("tap packet ignored: {err}"));
                         log::log(&format!("tap packet ignored: {err}"));
                     }
                 },
@@ -1441,6 +1482,7 @@ fn start_plugin_capture(
                 }
                 Err(err) => {
                     state_thread.capture_errors.fetch_add(1, Ordering::Relaxed);
+                    set_last_error(&state_thread, format!("tap socket error: {err}"));
                     log::log(&format!("tap socket error: {err}"));
                     thread::sleep(Duration::from_millis(100));
                 }
@@ -1591,6 +1633,7 @@ fn start_coreaudio_capture(
             for frame in data.chunks(input_channels_usize) {
                 if frame.len() <= left_index || frame.len() <= right_index {
                     state_cb.capture_errors.fetch_add(1, Ordering::Relaxed);
+                    set_last_error(&state_cb, "CoreAudio frame shorter than selected channels");
                     continue;
                 }
                 let left = frame[left_index];
@@ -1607,9 +1650,11 @@ fn start_coreaudio_capture(
                         state_cb.captured_frames.fetch_add(1, Ordering::Relaxed);
                     } else {
                         state_cb.overflow_frames.fetch_add(1, Ordering::Relaxed);
+                        set_last_error(&state_cb, "capture ring buffer overflow");
                     }
                 } else {
                     state_cb.overflow_frames.fetch_add(1, Ordering::Relaxed);
+                    set_last_error(&state_cb, "capture ring buffer overflow");
                 }
             }
             if frames_seen > 0 {
@@ -1626,6 +1671,7 @@ fn start_coreaudio_capture(
             let state_err = Arc::clone(&state);
             move |err| {
                 state_err.capture_errors.fetch_add(1, Ordering::Relaxed);
+                set_last_error(&state_err, format!("input stream error: {err}"));
                 log::log(&format!("input stream error: {err}"));
             }
         },
@@ -1866,12 +1912,14 @@ fn push_tap_packet(
             .overflow_frames
             .fetch_add(packet.frames as u64, Ordering::Relaxed);
         state.capture_errors.fetch_add(1, Ordering::Relaxed);
+        set_last_error(state, "tap packet larger than scratch buffer");
         return;
     }
     if prod.free_len() < needed_samples {
         state
             .overflow_frames
             .fetch_add(packet.frames as u64, Ordering::Relaxed);
+        set_last_error(state, "plugin ring buffer overflow");
         return;
     }
 
@@ -2301,14 +2349,15 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
     let tap_packets = state.tap_packets.load(Ordering::Relaxed);
     let tap_gaps = state.tap_seq_gaps.load(Ordering::Relaxed);
     let tap_drops = state.tap_reported_drops.load(Ordering::Relaxed);
+    let frames_dropped_total = overflow.saturating_add(tap_drops);
     let rtp_packets = state.rtp_packets_sent.load(Ordering::Relaxed);
     let rtp_bytes = state.rtp_bytes_sent.load(Ordering::Relaxed);
     let subscribers = state.subscriber_count.load(Ordering::Relaxed);
 
     f.render_widget(
         Paragraph::new(format!(
-            "{} Hz  captured={}  sent={}  rtpPackets={}  rtpBytes={}  listeners={}  overflow={}  underrun={}  inputErr={}  lkErr={}  reconnect={}",
-            runtime.input_rate, captured, sent, rtp_packets, rtp_bytes, subscribers, overflow, underruns, errors, livekit_errors, reconnects
+            "{} Hz  captured={}  sent={}  rtpPackets={}  rtpBytes={}  listeners={}  dropped={}  underrun={}  inputErr={}  lkErr={}  reconnect={}",
+            runtime.input_rate, captured, sent, rtp_packets, rtp_bytes, subscribers, frames_dropped_total, underruns, errors, livekit_errors, reconnects
         ))
         .block(Block::default().title("Frames").borders(Borders::ALL))
         .style(Style::default().fg(if overflow > 0 || errors > 0 || livekit_errors > 0 {
@@ -2535,6 +2584,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
     let tap_packets = state.tap_packets.load(Ordering::Relaxed);
     let tap_gaps = state.tap_seq_gaps.load(Ordering::Relaxed);
     let tap_drops = state.tap_reported_drops.load(Ordering::Relaxed);
+    let frames_dropped_total = overflow.saturating_add(tap_drops);
     let rtp_packets = state.rtp_packets_sent.load(Ordering::Relaxed);
     let rtp_bytes = state.rtp_bytes_sent.load(Ordering::Relaxed);
     let rtp_header_bytes = state.rtp_header_bytes_sent.load(Ordering::Relaxed);
@@ -2550,6 +2600,18 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
     let subscriber_count = state.subscriber_count.load(Ordering::Relaxed);
     let listener_identities = listener_identities_snapshot(state);
     let published_track_sid = published_track_sid_snapshot(state);
+    let last_error = last_error_snapshot(state);
+    let vst3_connected = if runtime.source_kind == "plugin" {
+        if tap_packets == 0 {
+            "unknown"
+        } else if last_audio_age_ms >= 0 && last_audio_age_ms <= 1_500 {
+            "yes"
+        } else {
+            "no"
+        }
+    } else {
+        "n/a"
+    };
 
     let body = format!(
         concat!(
@@ -2560,10 +2622,12 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
             "  \"source_kind\": {source_kind},\n",
             "  \"livekit_url\": {livekit_url},\n",
             "  \"listen_url\": \"https://livekit.kenichi-kawabata.com/\",\n",
+            "  \"log_path\": {log_path},\n",
             "  \"room\": {room},\n",
             "  \"identity\": {identity},\n",
             "  \"track\": \"reaper-master\",\n",
             "  \"track_sid\": {track_sid},\n",
+            "  \"vst3_connected\": {vst3_connected},\n",
             "  \"input_rate_hz\": {input_rate},\n",
             "  \"output_rate_hz\": 48000,\n",
             "  \"output\": \"48 kHz stereo WebRTC audio\",\n",
@@ -2578,6 +2642,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
             "  \"tap_packets\": {tap_packets},\n",
             "  \"tap_sequence_gaps\": {tap_gaps},\n",
             "  \"plugin_reported_drops\": {tap_drops},\n",
+            "  \"frames_dropped_total\": {frames_dropped_total},\n",
             "  \"rtp_packets_sent\": {rtp_packets},\n",
             "  \"rtp_bytes_sent\": {rtp_bytes},\n",
             "  \"rtp_header_bytes_sent\": {rtp_header_bytes},\n",
@@ -2597,7 +2662,8 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
             "  \"rms_left_milli\": {rms_l},\n",
             "  \"rms_right_milli\": {rms_r},\n",
             "  \"last_audio_frame_age_ms\": {last_audio_age_ms},\n",
-            "  \"audio_state\": {audio_state}\n",
+            "  \"audio_state\": {audio_state},\n",
+            "  \"last_error\": {last_error}\n",
             "}}\n"
         ),
         now_ms = now_ms,
@@ -2605,9 +2671,11 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
         source = json_string(&runtime.source_label),
         source_kind = json_string(&runtime.source_kind),
         livekit_url = json_string(&runtime.livekit_url),
+        log_path = json_string(&runtime.log_path.display().to_string()),
         room = json_string(&runtime.room),
         identity = json_string(&runtime.identity),
         track_sid = json_string(&published_track_sid),
+        vst3_connected = json_string(vst3_connected),
         input_rate = runtime.input_rate,
         profile = json_string(profile_label(runtime.audio_profile)),
         bitrate = runtime.bitrate,
@@ -2620,6 +2688,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
         tap_packets = tap_packets,
         tap_gaps = tap_gaps,
         tap_drops = tap_drops,
+        frames_dropped_total = frames_dropped_total,
         rtp_packets = rtp_packets,
         rtp_bytes = rtp_bytes,
         rtp_header_bytes = rtp_header_bytes,
@@ -2640,6 +2709,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
         rms_r = rms_r,
         last_audio_age_ms = last_audio_age_ms,
         audio_state = json_string(audio_state),
+        last_error = json_string(&last_error),
     );
 
     let tmp_path = runtime.status_file.with_extension("json.tmp");

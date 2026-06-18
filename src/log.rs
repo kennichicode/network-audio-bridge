@@ -19,6 +19,10 @@ fn log_path() -> Option<PathBuf> {
     Some(p)
 }
 
+pub fn path() -> Option<PathBuf> {
+    log_path()
+}
+
 fn rotate_if_needed(path: &PathBuf) {
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.len() > MAX_LOG_BYTES {

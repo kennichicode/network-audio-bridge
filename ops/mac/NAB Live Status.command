@@ -38,8 +38,10 @@ print(json.dumps({
     "identity": data.get("identity"),
     "track": data.get("track"),
     "track_sid": data.get("track_sid", ""),
+    "vst3_connected": data.get("vst3_connected", "unknown"),
     "livekit_url": data.get("livekit_url"),
     "listen_url": data.get("listen_url"),
+    "log_path": data.get("log_path"),
     "profile": data.get("profile"),
     "bitrate_bps": data.get("bitrate_bps", 0),
     "red_enabled": data.get("red_enabled"),
@@ -51,6 +53,7 @@ print(json.dumps({
     "tap_packets": data.get("tap_packets", 0),
     "tap_sequence_gaps": data.get("tap_sequence_gaps", 0),
     "plugin_reported_drops": data.get("plugin_reported_drops", 0),
+    "frames_dropped_total": data.get("frames_dropped_total", data.get("overflow_frames", 0) + data.get("plugin_reported_drops", 0)),
     "rtp_packets_sent": data.get("rtp_packets_sent", 0),
     "rtp_bytes_sent": data.get("rtp_bytes_sent", 0),
     "rtp_header_bytes_sent": data.get("rtp_header_bytes_sent", 0),
@@ -69,6 +72,7 @@ print(json.dumps({
     "peak_right_milli": data.get("peak_right_milli", 0),
     "rms_left_milli": data.get("rms_left_milli", 0),
     "rms_right_milli": data.get("rms_right_milli", 0),
+    "last_error": data.get("last_error", ""),
 }))
 PY
 }
@@ -203,17 +207,21 @@ print(f"Source     : {b['source']}  [{b['source_kind']}]")
 print(f"Room       : {b['room']}")
 print(f"Identity   : {b['identity']}")
 print(f"Track      : {b['track']}  sid={b['track_sid'] or 'unknown'}")
+print(f"VST3       : {b['vst3_connected']}")
 print(f"LiveKit    : {b['livekit_url']}")
 print(f"Listen     : {b['listen_url']}")
+print(f"Log        : {b['log_path'] or 'unknown'}")
 print(f"Profile    : {b['profile']} / {int(b['bitrate_bps'] / 1000)} kbps / RED={b['red_enabled']} / DTX={b['dtx_enabled']}")
 print(f"AudioState : {b['audio_state']} / lastAudioAge={b['last_audio_frame_age_ms']} ms")
 print(f"RTP Stats  : age={b['last_rtp_stats_age_ms']} ms / errors={b['rtp_stats_errors']}")
 print(f"Listeners  : {b['subscriber_count']}  [{listeners_text}]")
+print(f"LastError  : {b['last_error'] or 'none'}")
 print("")
 print("2 second movement check")
 print(f"  VST3 packets: +{tap_delta}" if b["source_kind"] == "plugin" else f"  VST3 packets: n/a ({b['source_kind']})")
 print(f"  Captured    : +{captured_delta} frames")
 print(f"  Sent        : +{sent_delta} frames")
+print(f"  Dropped     : total={b['frames_dropped_total']}  pluginDrops={b['plugin_reported_drops']}  overflow={b['overflow_frames']}")
 print(f"  RTP packets : +{rtp_packet_delta}  total={b['rtp_packets_sent']}")
 print(f"  RTP bytes   : +{rtp_byte_delta}  total={b['rtp_bytes_sent']}")
 print(f"  RTP retrans : packets={b['rtp_retransmitted_packets_sent']} bytes={b['rtp_retransmitted_bytes_sent']}")
