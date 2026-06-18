@@ -85,16 +85,16 @@ echo ""
 echo "This does not start streaming. It reinstalls the VST3 and checks the NAB Live runtime."
 echo ""
 check_install
-read -r "reply?Type INSTALL to reinstall VST3, CHECK to re-check, or press Enter to close: "
+read -r "reply?Type INSTALL to reinstall VST3, CHECK to re-check, or press Enter to close: " || reply=""
 if [[ "$reply" == "CHECK" ]]; then
   echo ""
   check_install
-  read -r "reply?Press Enter to close."
+  read -r "reply?Press Enter to close." || true
   exit 0
 fi
 if [[ "$reply" != "INSTALL" ]]; then
   echo "Cancelled."
-  read -r "reply?Press Enter to close."
+  read -r "reply?Press Enter to close." || true
   exit 0
 fi
 
@@ -104,11 +104,11 @@ elif [[ -x "$APP_DIR/install-nab-tap-plugin.sh" ]]; then
   "$APP_DIR/install-nab-tap-plugin.sh" "$APP_DIR/plugins/nab-tap"
 else
   echo "install-nab-tap-plugin.sh was not found."
-  read -r "reply?Press Enter to close."
+  read -r "reply?Press Enter to close." || true
   exit 1
 fi
 
 echo ""
 check_install
 echo "Done. Open NAB Live Sender.command only when you want to start streaming."
-read -r "reply?Press Enter to close."
+read -r "reply?Press Enter to close." || true
