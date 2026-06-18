@@ -22,9 +22,28 @@ const apiKey = env.LIVEKIT_API_KEY;
 const apiSecret = env.LIVEKIT_API_SECRET;
 const defaultRoom = env.LIVEKIT_ROOM || "reaper-master";
 const listenPasscode = process.env.LIVEKIT_LISTEN_PASSCODE || env.LIVEKIT_LISTEN_PASSCODE || "";
+const tokenTtlSeconds = Math.max(
+  60,
+  Math.min(3600, Number(process.env.LIVEKIT_TOKEN_TTL_SECONDS || env.LIVEKIT_TOKEN_TTL_SECONDS || 1800)),
+);
+const allowedOrigins = String(
+  process.env.LIVEKIT_ALLOWED_ORIGINS ||
+    env.LIVEKIT_ALLOWED_ORIGINS ||
+    "https://livekit.kenichi-kawabata.com",
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+const rateWindowMs = 60 * 1000;
+const maxTokenRequestsPerWindow = 20;
+const rateBuckets = new Map();
 
 if (!listenPasscode) {
   console.error("LIVEKIT_LISTEN_PASSCODE is required");
+  process.exit(1);
+}
+if (!apiKey || !apiSecret) {
+  console.error("LIVEKIT_API_KEY and LIVEKIT_API_SECRET are required");
   process.exit(1);
 }
 
@@ -40,7 +59,7 @@ function signToken({ room, identity }) {
   const now = Math.floor(Date.now() / 1000);
   const header = { alg: "HS256", typ: "JWT" };
   const payload = {
-    exp: now + 6 * 60 * 60,
+    exp: now + tokenTtlSeconds,
     iss: apiKey,
     nbf: now - 5,
     sub: identity,
@@ -59,7 +78,7 @@ function signToken({ room, identity }) {
 }
 
 function json(res, status, body) {
-  res.writeHead(status, { "Content-Type": "application/json" });
+  res.writeHead(status, { "Content-Type": "application/json", "X-Content-Type-Options": "nosniff" });
   res.end(JSON.stringify(body));
 }
 
@@ -97,9 +116,48 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(left, right);
 }
 
+function requestIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "");
+  if (forwarded) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.socket.remoteAddress || "unknown";
+}
+
+function allowOrigin(req, res) {
+  const origin = req.headers.origin;
+  if (!origin) {
+    return true;
+  }
+  if (!allowedOrigins.includes(origin)) {
+    return false;
+  }
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Vary", "Origin");
+  return true;
+}
+
+function rateLimitToken(req) {
+  const key = requestIp(req);
+  const now = Date.now();
+  const bucket = rateBuckets.get(key);
+  if (!bucket || now - bucket.startedAt > rateWindowMs) {
+    rateBuckets.set(key, { startedAt: now, count: 1 });
+    return true;
+  }
+  bucket.count += 1;
+  return bucket.count <= maxTokenRequestsPerWindow;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   res.setHeader("Cache-Control", "no-store");
+  res.setHeader("Referrer-Policy", "no-referrer");
+
+  if (!allowOrigin(req, res)) {
+    json(res, 403, { error: "origin_not_allowed" });
+    return;
+  }
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
@@ -111,7 +169,12 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === "/healthz") {
-    json(res, 200, { ok: true });
+    json(res, 200, {
+      ok: true,
+      room: defaultRoom,
+      ttlSeconds: tokenTtlSeconds,
+      security: "passcode + subscribe-only listener token",
+    });
     return;
   }
 
@@ -122,6 +185,11 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method !== "POST") {
     json(res, 405, { error: "method_not_allowed" });
+    return;
+  }
+
+  if (!rateLimitToken(req)) {
+    json(res, 429, { error: "rate_limited" });
     return;
   }
 
@@ -145,10 +213,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   const suffix = crypto.randomBytes(4).toString("hex");
-  const requestedIdentity = String(body.identity || "").replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 32);
-  const identity = requestedIdentity || `listener-${suffix}`;
+  const requestedIdentity = String(body.identity || "").replace(/[^a-zA-Z0-9_.-]/g, "").slice(0, 28);
+  const identity = requestedIdentity.startsWith("listener-")
+    ? requestedIdentity
+    : `listener-${requestedIdentity || suffix}`.slice(0, 36);
   const token = signToken({ room, identity });
-  json(res, 200, { url: env.LIVEKIT_URL, room, identity, token });
+  json(res, 200, {
+    url: env.LIVEKIT_URL,
+    room,
+    identity,
+    expiresInSeconds: tokenTtlSeconds,
+    permissions: { canPublish: false, canSubscribe: true },
+    token,
+  });
 });
 
 server.listen(8094, "127.0.0.1", () => {

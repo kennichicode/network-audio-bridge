@@ -21,8 +21,8 @@ use ratatui::{
 use ringbuf::HeapRb;
 use rubato::{FftFixedInOut, Resampler};
 use std::collections::HashMap;
-use std::fs;
-use std::io::{self, IsTerminal};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -59,6 +59,7 @@ const CONNECTION_CONNECTING: usize = 0;
 const CONNECTION_CONNECTED: usize = 1;
 const CONNECTION_RECONNECTING: usize = 2;
 const CONNECTION_DISCONNECTED: usize = 3;
+static TERMINATE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -66,18 +67,29 @@ type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 enum SourceArg {
     Plugin,
     Coreaudio,
+    TestTone,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum AudioProfileArg {
-    /// High-quality music monitoring. Default for REAPER master.
-    Concert,
-    /// Slightly lower bitrate while keeping music-safe defaults.
-    Balanced,
+    /// Stable music monitoring default.
+    #[value(
+        name = "stable-music",
+        alias = "default-stable-music",
+        alias = "balanced"
+    )]
+    StableMusic,
+    /// High-quality music monitoring when the network is stable.
+    #[value(name = "hi-fi-music", alias = "concert")]
+    HiFiMusic,
     /// Speech-oriented, lower bitrate, enables DTX unless overridden.
     Speech,
     /// Lowest bandwidth profile for difficult networks.
+    #[value(name = "low-bandwidth", alias = "safe-low-bandwidth")]
     LowBandwidth,
+    /// Lab-only maximum Opus bitrate. Do not use as the default.
+    #[value(name = "max-quality-lab")]
+    MaxQualityLab,
 }
 
 #[derive(Parser, Debug)]
@@ -107,6 +119,22 @@ struct Args {
     /// CoreAudio input sample rate. Use 96000 for a 96kHz REAPER session.
     #[arg(long, default_value_t = 96_000)]
     input_sample_rate: u32,
+
+    /// Use an internal test tone instead of REAPER/NAB Tap. This bypasses VST3.
+    #[arg(long)]
+    test_tone: bool,
+
+    /// Test tone duration in seconds. Omit for continuous tone.
+    #[arg(long)]
+    test_tone_duration: Option<f64>,
+
+    /// Test tone frequency in Hz.
+    #[arg(long, default_value_t = 1_000.0)]
+    test_tone_hz: f32,
+
+    /// Test tone level in dBFS.
+    #[arg(long, default_value_t = -18.0)]
+    test_tone_dbfs: f32,
 
     /// Number of channels to open on the CoreAudio input device.
     #[arg(long, default_value_t = 2)]
@@ -144,8 +172,8 @@ struct Args {
     #[arg(long, default_value = "~/.config/kenichi-vps/livekit.env")]
     env_file: String,
 
-    /// Audio profile. Use concert for music unless the network is constrained.
-    #[arg(long, value_enum, default_value_t = AudioProfileArg::Concert)]
+    /// Audio profile. stable-music is the default for music monitoring.
+    #[arg(long, value_enum, default_value_t = AudioProfileArg::StableMusic)]
     profile: AudioProfileArg,
 
     /// Audio bitrate requested for the published track. Overrides --profile.
@@ -186,6 +214,11 @@ enum CaptureConfig {
     Plugin {
         socket_path: String,
     },
+    TestTone {
+        frequency_hz: f32,
+        level_dbfs: f32,
+        duration: Option<Duration>,
+    },
     CoreAudio {
         input: Option<String>,
         input_sample_rate: u32,
@@ -197,6 +230,7 @@ enum CaptureConfig {
 
 struct RuntimeInfo {
     source_label: String,
+    source_kind: String,
     livekit_url: String,
     room: String,
     identity: String,
@@ -251,6 +285,9 @@ struct State {
     ring_buffer_ms: AtomicUsize,
     peak_l_milli: AtomicUsize,
     peak_r_milli: AtomicUsize,
+    rms_l_milli: AtomicUsize,
+    rms_r_milli: AtomicUsize,
+    last_audio_unix_ms: AtomicU64,
     tap_packets: AtomicU64,
     tap_seq_gaps: AtomicU64,
     tap_reported_drops: AtomicU64,
@@ -267,6 +304,7 @@ enum CaptureGuard {
     CoreAudio(cpal::Stream),
     #[cfg(unix)]
     Plugin(PluginCaptureGuard),
+    TestTone(TestToneGuard),
 }
 
 impl CaptureGuard {
@@ -281,7 +319,58 @@ impl CaptureGuard {
                 let _ = guard.running.load(Ordering::Relaxed);
                 "plugin"
             }
+            CaptureGuard::TestTone(guard) => {
+                let _ = guard.running.load(Ordering::Relaxed);
+                "test-tone"
+            }
         }
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn handle_termination_signal(_: libc::c_int) {
+    TERMINATE_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_termination_handler() {
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            handle_termination_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn install_termination_handler() {}
+
+fn termination_requested() -> bool {
+    TERMINATE_REQUESTED.load(Ordering::SeqCst)
+}
+
+struct TestToneGuard {
+    running: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for TestToneGuard {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct RuntimeInstanceLock {
+    _file: File,
+    path: PathBuf,
+}
+
+impl Drop for RuntimeInstanceLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -290,6 +379,20 @@ struct PluginCaptureGuard {
     running: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
     socket_path: PathBuf,
+    _lock: PluginInstanceLock,
+}
+
+#[cfg(unix)]
+struct PluginInstanceLock {
+    _file: File,
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for PluginInstanceLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 #[cfg(unix)]
@@ -300,6 +403,7 @@ impl Drop for PluginCaptureGuard {
             let _ = handle.join();
         }
         let _ = fs::remove_file(&self.socket_path);
+        let _ = fs::remove_file(&self._lock.path);
     }
 }
 
@@ -314,6 +418,7 @@ enum WizardStep {
 #[tokio::main]
 async fn main() -> AppResult<()> {
     log::init("nab-live");
+    install_termination_handler();
 
     let args = Args::parse();
     let host = cpal::default_host();
@@ -362,6 +467,7 @@ async fn main() -> AppResult<()> {
         reconnect: !args.no_reconnect,
     };
 
+    let _runtime_lock = acquire_runtime_instance_lock(&args.room, &args.identity)?;
     let state = Arc::new(State::default());
     let mut capture = start_capture(
         &host,
@@ -369,7 +475,7 @@ async fn main() -> AppResult<()> {
         Arc::clone(&state),
         args.ring_buffer_seconds,
     )?;
-    let _capture_guard_kind = capture.guard.kind();
+    let capture_guard_kind = capture.guard.kind().to_string();
 
     eprintln!("NAB Live source: {}", capture.source_label);
     eprintln!(
@@ -384,6 +490,7 @@ async fn main() -> AppResult<()> {
 
     let runtime = RuntimeInfo {
         source_label: capture.source_label.clone(),
+        source_kind: capture_guard_kind,
         livekit_url: livekit_url.clone(),
         room: args.room.clone(),
         identity: args.identity.clone(),
@@ -550,9 +657,30 @@ fn reconnect_delay(attempt: u32) -> Duration {
 }
 
 async fn wait_before_reconnect(delay: Duration) -> bool {
+    if termination_requested() {
+        return false;
+    }
+    #[cfg(unix)]
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+
     tokio::select! {
         _ = tokio::time::sleep(delay) => true,
         _ = tokio::signal::ctrl_c() => false,
+        _ = async {
+            #[cfg(unix)]
+            {
+                if let Some(signal) = sigterm.as_mut() {
+                    let _ = signal.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                std::future::pending::<()>().await;
+            }
+        } => false,
     }
 }
 
@@ -603,7 +731,7 @@ fn handle_room_event(event: RoomEvent, state: &State) -> bool {
 }
 
 fn should_show_wizard(args: &Args) -> bool {
-    args.source.is_none() && args.input.is_none()
+    args.source.is_none() && args.input.is_none() && !args.test_tone
 }
 
 fn resolve_audio_send_config(args: &Args) -> AppResult<AudioSendConfig> {
@@ -639,10 +767,11 @@ fn resolve_audio_send_config(args: &Args) -> AppResult<AudioSendConfig> {
 
 fn profile_defaults(profile: AudioProfileArg) -> (u64, bool, bool, u32) {
     match profile {
-        AudioProfileArg::Concert => (256_000, true, false, 1_000),
-        AudioProfileArg::Balanced => (160_000, true, false, 1_200),
+        AudioProfileArg::StableMusic => (160_000, true, false, 1_200),
+        AudioProfileArg::HiFiMusic => (256_000, true, false, 1_000),
         AudioProfileArg::Speech => (64_000, true, true, 800),
         AudioProfileArg::LowBandwidth => (96_000, true, false, 1_500),
+        AudioProfileArg::MaxQualityLab => (510_000, false, false, 1_000),
     }
 }
 
@@ -657,10 +786,34 @@ fn validate_buffer_seconds(seconds: usize) -> AppResult<()> {
 }
 
 fn capture_config_from_args(args: &Args) -> AppResult<CaptureConfig> {
+    if args.test_tone || args.source == Some(SourceArg::TestTone) {
+        if !(20.0..=20_000.0).contains(&args.test_tone_hz) {
+            return Err(io_error("test-tone-hz must be 20..=20000").into());
+        }
+        if !(-90.0..=0.0).contains(&args.test_tone_dbfs) {
+            return Err(io_error("test-tone-dbfs must be -90..=0").into());
+        }
+        let duration = match args.test_tone_duration {
+            Some(seconds) if seconds > 0.0 && seconds <= 24.0 * 60.0 * 60.0 => {
+                Some(Duration::from_secs_f64(seconds))
+            }
+            Some(_) => {
+                return Err(io_error("test-tone-duration must be >0 and <=86400 seconds").into());
+            }
+            None => None,
+        };
+        return Ok(CaptureConfig::TestTone {
+            frequency_hz: args.test_tone_hz,
+            level_dbfs: args.test_tone_dbfs,
+            duration,
+        });
+    }
+
     match args.source.unwrap_or(SourceArg::Coreaudio) {
         SourceArg::Plugin => Ok(CaptureConfig::Plugin {
             socket_path: args.plugin_socket.clone(),
         }),
+        SourceArg::TestTone => unreachable!("test tone handled above"),
         SourceArg::Coreaudio => {
             validate_coreaudio_selection(
                 args.input_channels,
@@ -785,6 +938,11 @@ fn run_wizard_inner(
                                 input_channels: OUT_CHANNELS as u16,
                                 left_channel: 1,
                                 right_channel: 2,
+                            },
+                            SourceArg::TestTone => CaptureConfig::TestTone {
+                                frequency_hz: 1_000.0,
+                                level_dbfs: -18.0,
+                                duration: None,
                             },
                         }));
                     }
@@ -929,6 +1087,17 @@ fn start_capture(
         CaptureConfig::Plugin { socket_path } => {
             start_plugin_capture(&socket_path, state, ring_buffer_seconds)
         }
+        CaptureConfig::TestTone {
+            frequency_hz,
+            level_dbfs,
+            duration,
+        } => start_test_tone_capture(
+            frequency_hz,
+            level_dbfs,
+            duration,
+            state,
+            ring_buffer_seconds,
+        ),
         CaptureConfig::CoreAudio {
             input,
             input_sample_rate,
@@ -957,6 +1126,8 @@ fn start_plugin_capture(
     ring_buffer_seconds: usize,
 ) -> AppResult<CaptureSetup> {
     let socket_path = prepare_tap_socket_path(socket_path)?;
+    let lock = acquire_plugin_instance_lock(&socket_path)?;
+    remove_stale_tap_socket(&socket_path)?;
     let socket = UnixDatagram::bind(&socket_path)?;
     configure_tap_socket(socket.as_raw_fd());
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
@@ -969,6 +1140,10 @@ fn start_plugin_capture(
 
     let mut buf = vec![0u8; TAP_MAX_PACKET_BYTES];
     let (first_packet_bytes, first_packet) = loop {
+        if termination_requested() {
+            let _ = fs::remove_file(&socket_path);
+            return Err(io_error("shutdown requested before first NAB Tap packet").into());
+        }
         match socket.recv(&mut buf) {
             Ok(amt) => match parse_tap_packet(&buf[..amt]) {
                 Ok(packet) => {
@@ -1013,6 +1188,9 @@ fn start_plugin_capture(
         let mut recv_buf = vec![0u8; TAP_MAX_PACKET_BYTES];
         let mut scratch = scratch;
         while running_thread.load(Ordering::Relaxed) {
+            if termination_requested() {
+                break;
+            }
             match socket.recv(&mut recv_buf) {
                 Ok(amt) => match parse_tap_packet(&recv_buf[..amt]) {
                     Ok(packet) => {
@@ -1057,6 +1235,7 @@ fn start_plugin_capture(
             running,
             handle: Some(handle),
             socket_path,
+            _lock: lock,
         }),
         cons,
     })
@@ -1094,9 +1273,48 @@ fn prepare_tap_socket_path(socket_path: &str) -> AppResult<PathBuf> {
     fs::create_dir_all(parent)?;
     fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
 
-    match fs::symlink_metadata(&socket_path) {
+    Ok(socket_path)
+}
+
+#[cfg(unix)]
+fn acquire_plugin_instance_lock(socket_path: &PathBuf) -> AppResult<PluginInstanceLock> {
+    let lock_path = PathBuf::from(format!("{}.lock", socket_path.display()));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        let err = io::Error::last_os_error();
+        if matches!(
+            err.raw_os_error(),
+            Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+        ) {
+            return Err(io_error(format!(
+                "NAB Live Sender is already running for {}. Open NAB Live Status.command instead of starting another sender.",
+                socket_path.display()
+            ))
+            .into());
+        }
+        return Err(err.into());
+    }
+
+    file.set_len(0)?;
+    writeln!(file, "pid={}", std::process::id())?;
+    writeln!(file, "socket={}", socket_path.display())?;
+    Ok(PluginInstanceLock {
+        _file: file,
+        path: lock_path,
+    })
+}
+
+#[cfg(unix)]
+fn remove_stale_tap_socket(socket_path: &PathBuf) -> AppResult<()> {
+    match fs::symlink_metadata(socket_path) {
         Ok(metadata) if metadata.file_type().is_socket() => {
-            fs::remove_file(&socket_path)?;
+            fs::remove_file(socket_path)?;
         }
         Ok(_) => {
             return Err(io_error(format!(
@@ -1108,8 +1326,7 @@ fn prepare_tap_socket_path(socket_path: &str) -> AppResult<PathBuf> {
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
         Err(err) => return Err(err.into()),
     }
-
-    Ok(socket_path)
+    Ok(())
 }
 
 fn start_coreaudio_capture(
@@ -1148,6 +1365,9 @@ fn start_coreaudio_capture(
         move |data: &[f32], _| {
             let mut peak_l = 0.0f32;
             let mut peak_r = 0.0f32;
+            let mut sum_l = 0.0f64;
+            let mut sum_r = 0.0f64;
+            let mut frames_seen = 0usize;
             for frame in data.chunks(input_channels_usize) {
                 if frame.len() <= left_index || frame.len() <= right_index {
                     state_cb.capture_errors.fetch_add(1, Ordering::Relaxed);
@@ -1157,6 +1377,9 @@ fn start_coreaudio_capture(
                 let right = frame[right_index];
                 peak_l = peak_l.max(left.abs());
                 peak_r = peak_r.max(right.abs());
+                sum_l += (left as f64) * (left as f64);
+                sum_r += (right as f64) * (right as f64);
+                frames_seen += 1;
                 if prod.free_len() >= OUT_CHANNELS {
                     let pair = [left, right];
                     let pushed = prod.push_slice(&pair);
@@ -1169,7 +1392,15 @@ fn start_coreaudio_capture(
                     state_cb.overflow_frames.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            store_peak(&state_cb, peak_l, peak_r);
+            if frames_seen > 0 {
+                store_levels(
+                    &state_cb,
+                    peak_l,
+                    peak_r,
+                    (sum_l / frames_seen as f64).sqrt() as f32,
+                    (sum_r / frames_seen as f64).sqrt() as f32,
+                );
+            }
         },
         {
             let state_err = Arc::clone(&state);
@@ -1191,6 +1422,151 @@ fn start_coreaudio_capture(
         guard: CaptureGuard::CoreAudio(input_stream),
         cons,
     })
+}
+
+fn start_test_tone_capture(
+    frequency_hz: f32,
+    level_dbfs: f32,
+    duration: Option<Duration>,
+    state: Arc<State>,
+    ring_buffer_seconds: usize,
+) -> AppResult<CaptureSetup> {
+    let input_rate = OUT_RATE;
+    let ring_capacity = input_rate as usize * OUT_CHANNELS * ring_buffer_seconds.max(1);
+    let rb = HeapRb::<f32>::new(ring_capacity);
+    let (mut prod, cons) = rb.split();
+    let running = Arc::new(AtomicBool::new(true));
+    let running_thread = Arc::clone(&running);
+    let state_thread = Arc::clone(&state);
+    let amplitude = 10.0f32.powf(level_dbfs / 20.0);
+    let frames_per_chunk = (input_rate as usize * OUT_FRAME_MS as usize) / 1000;
+    let sleep_duration = Duration::from_millis(OUT_FRAME_MS as u64);
+
+    let handle = thread::spawn(move || {
+        let started = Instant::now();
+        let mut frame_index: u64 = 0;
+        let mut chunk = vec![0.0f32; frames_per_chunk * OUT_CHANNELS];
+        while running_thread.load(Ordering::Relaxed) {
+            if duration.is_some_and(|limit| started.elapsed() >= limit) {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+
+            let mut peak_l = 0.0f32;
+            let mut peak_r = 0.0f32;
+            let mut sum_l = 0.0f64;
+            let mut sum_r = 0.0f64;
+            for frame in 0..frames_per_chunk {
+                let t = frame_index as f32 / input_rate as f32;
+                let sample = amplitude * (std::f32::consts::TAU * frequency_hz * t).sin();
+                chunk[frame * OUT_CHANNELS] = sample;
+                chunk[frame * OUT_CHANNELS + 1] = sample;
+                peak_l = peak_l.max(sample.abs());
+                peak_r = peak_r.max(sample.abs());
+                sum_l += (sample as f64) * (sample as f64);
+                sum_r += (sample as f64) * (sample as f64);
+                frame_index = frame_index.wrapping_add(1);
+            }
+
+            if prod.free_len() >= chunk.len() {
+                let pushed = prod.push_slice(&chunk);
+                state_thread
+                    .captured_frames
+                    .fetch_add((pushed / OUT_CHANNELS) as u64, Ordering::Relaxed);
+                if pushed != chunk.len() {
+                    state_thread.overflow_frames.fetch_add(
+                        ((chunk.len() - pushed) / OUT_CHANNELS) as u64,
+                        Ordering::Relaxed,
+                    );
+                }
+            } else {
+                state_thread
+                    .overflow_frames
+                    .fetch_add(frames_per_chunk as u64, Ordering::Relaxed);
+            }
+            store_levels(
+                &state_thread,
+                peak_l,
+                peak_r,
+                (sum_l / frames_per_chunk as f64).sqrt() as f32,
+                (sum_r / frames_per_chunk as f64).sqrt() as f32,
+            );
+            thread::sleep(sleep_duration);
+        }
+    });
+
+    let duration_label = duration
+        .map(|d| format!(", {:.1}s", d.as_secs_f64()))
+        .unwrap_or_else(|| ", continuous".to_string());
+
+    Ok(CaptureSetup {
+        input_rate,
+        source_label: format!(
+            "Internal test tone ({:.0} Hz, {:.1} dBFS{duration_label})",
+            frequency_hz, level_dbfs
+        ),
+        guard: CaptureGuard::TestTone(TestToneGuard {
+            running,
+            handle: Some(handle),
+        }),
+        cons,
+    })
+}
+
+fn acquire_runtime_instance_lock(room: &str, identity: &str) -> AppResult<RuntimeInstanceLock> {
+    let lock_dir = expand_tilde("~/.nab/locks");
+    fs::create_dir_all(&lock_dir)?;
+    fs::set_permissions(&lock_dir, fs::Permissions::from_mode(0o700))?;
+    let lock_path = lock_dir.join(format!(
+        "nab-live-{}-{}.lock",
+        safe_lock_component(room),
+        safe_lock_component(identity)
+    ));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        let err = io::Error::last_os_error();
+        if matches!(
+            err.raw_os_error(),
+            Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+        ) {
+            return Err(io_error(format!(
+                "NAB Live is already running for room={room} identity={identity}. Refusing duplicate LiveKit identity."
+            ))
+            .into());
+        }
+        return Err(err.into());
+    }
+
+    file.set_len(0)?;
+    writeln!(file, "pid={}", std::process::id())?;
+    writeln!(file, "room={room}")?;
+    writeln!(file, "identity={identity}")?;
+    Ok(RuntimeInstanceLock {
+        _file: file,
+        path: lock_path,
+    })
+}
+
+fn safe_lock_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len().max(1));
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "default".to_string()
+    } else {
+        out
+    }
 }
 
 #[derive(Clone)]
@@ -1281,6 +1657,8 @@ fn push_tap_packet(
 
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
+    let mut sum_l = 0.0f64;
+    let mut sum_r = 0.0f64;
     for frame in 0..packet.frames {
         let base = frame * packet.channels * std::mem::size_of::<f32>();
         let left = LittleEndian::read_f32(&packet.payload[base..base + 4]);
@@ -1291,6 +1669,8 @@ fn push_tap_packet(
         };
         peak_l = peak_l.max(left.abs());
         peak_r = peak_r.max(right.abs());
+        sum_l += (left as f64) * (left as f64);
+        sum_r += (right as f64) * (right as f64);
         scratch[frame * OUT_CHANNELS] = left;
         scratch[frame * OUT_CHANNELS + 1] = right;
     }
@@ -1310,10 +1690,16 @@ fn push_tap_packet(
     state
         .tap_reported_drops
         .store(packet.dropped_frames, Ordering::Relaxed);
-    store_peak(state, peak_l, peak_r);
+    store_levels(
+        state,
+        peak_l,
+        peak_r,
+        (sum_l / packet.frames as f64).sqrt() as f32,
+        (sum_r / packet.frames as f64).sqrt() as f32,
+    );
 }
 
-fn store_peak(state: &State, peak_l: f32, peak_r: f32) {
+fn store_levels(state: &State, peak_l: f32, peak_r: f32, rms_l: f32, rms_r: f32) {
     state.peak_l_milli.store(
         ((peak_l.clamp(0.0, 1.0) * 1000.0).round() as usize).min(1000),
         Ordering::Relaxed,
@@ -1322,6 +1708,17 @@ fn store_peak(state: &State, peak_l: f32, peak_r: f32) {
         ((peak_r.clamp(0.0, 1.0) * 1000.0).round() as usize).min(1000),
         Ordering::Relaxed,
     );
+    state.rms_l_milli.store(
+        ((rms_l.clamp(0.0, 1.0) * 1000.0).round() as usize).min(1000),
+        Ordering::Relaxed,
+    );
+    state.rms_r_milli.store(
+        ((rms_r.clamp(0.0, 1.0) * 1000.0).round() as usize).min(1000),
+        Ordering::Relaxed,
+    );
+    state
+        .last_audio_unix_ms
+        .store(now_unix_ms() as u64, Ordering::Relaxed);
 }
 
 struct AudioPump {
@@ -1439,11 +1836,26 @@ async fn run_plain_loop(
     let mut status_tick = tokio::time::interval(Duration::from_secs(2));
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let terminate = sigterm.recv();
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::pin!(terminate);
 
     loop {
+        if termination_requested() {
+            eprintln!("Stopping NAB Live after SIGTERM...");
+            return Ok(LoopExit::UserQuit);
+        }
         tokio::select! {
             _ = &mut ctrl_c => {
                 eprintln!("Stopping NAB Live...");
+                return Ok(LoopExit::UserQuit);
+            }
+            _ = &mut terminate => {
+                eprintln!("Stopping NAB Live after SIGTERM...");
                 return Ok(LoopExit::UserQuit);
             }
             event = events.recv() => {
@@ -1517,12 +1929,23 @@ async fn run_status_tui_inner(
     let mut status_tick = tokio::time::interval(Duration::from_secs(1));
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
+    let terminate = sigterm.recv();
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::pin!(terminate);
     let mut quit_pending = false;
     let mut quit_time = Instant::now();
 
     loop {
+        if termination_requested() {
+            return Ok(LoopExit::UserQuit);
+        }
         tokio::select! {
             _ = &mut ctrl_c => return Ok(LoopExit::UserQuit),
+            _ = &mut terminate => return Ok(LoopExit::UserQuit),
             event = events.recv() => {
                 let Some(event) = event else {
                     return Ok(LoopExit::Reconnect);
@@ -1690,10 +2113,11 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
 
 fn profile_label(profile: AudioProfileArg) -> &'static str {
     match profile {
-        AudioProfileArg::Concert => "concert",
-        AudioProfileArg::Balanced => "balanced",
+        AudioProfileArg::StableMusic => "stable-music",
+        AudioProfileArg::HiFiMusic => "hi-fi-music",
         AudioProfileArg::Speech => "speech",
         AudioProfileArg::LowBandwidth => "low-bandwidth",
+        AudioProfileArg::MaxQualityLab => "max-quality-lab",
     }
 }
 
@@ -1844,10 +2268,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let now_ms = now_unix_ms();
     let connection = connection_label(state.connection_state.load(Ordering::Relaxed));
     let captured = state.captured_frames.load(Ordering::Relaxed);
     let sent = state.sent_frames.load(Ordering::Relaxed);
@@ -1859,6 +2280,23 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
     let buffer_ms = state.ring_buffer_ms.load(Ordering::Relaxed);
     let peak_l = state.peak_l_milli.load(Ordering::Relaxed);
     let peak_r = state.peak_r_milli.load(Ordering::Relaxed);
+    let rms_l = state.rms_l_milli.load(Ordering::Relaxed);
+    let rms_r = state.rms_r_milli.load(Ordering::Relaxed);
+    let last_audio_ms = state.last_audio_unix_ms.load(Ordering::Relaxed);
+    let last_audio_age_ms: i128 = if last_audio_ms == 0 {
+        -1
+    } else {
+        now_ms as i128 - last_audio_ms as i128
+    };
+    let audio_state = if last_audio_ms == 0 {
+        "no-audio-yet"
+    } else if last_audio_age_ms > 1_500 {
+        "stalled"
+    } else if rms_l.max(rms_r) <= 1 {
+        "silence"
+    } else {
+        "active"
+    };
     let tap_packets = state.tap_packets.load(Ordering::Relaxed);
     let tap_gaps = state.tap_seq_gaps.load(Ordering::Relaxed);
     let tap_drops = state.tap_reported_drops.load(Ordering::Relaxed);
@@ -1869,6 +2307,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
             "  \"updated_at_unix_ms\": {now_ms},\n",
             "  \"connection\": {connection},\n",
             "  \"source\": {source},\n",
+            "  \"source_kind\": {source_kind},\n",
             "  \"livekit_url\": {livekit_url},\n",
             "  \"listen_url\": \"https://livekit.kenichi-kawabata.com/\",\n",
             "  \"room\": {room},\n",
@@ -1894,12 +2333,17 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
             "  \"livekit_errors\": {livekit_errors},\n",
             "  \"reconnects\": {reconnects},\n",
             "  \"peak_left_milli\": {peak_l},\n",
-            "  \"peak_right_milli\": {peak_r}\n",
+            "  \"peak_right_milli\": {peak_r},\n",
+            "  \"rms_left_milli\": {rms_l},\n",
+            "  \"rms_right_milli\": {rms_r},\n",
+            "  \"last_audio_frame_age_ms\": {last_audio_age_ms},\n",
+            "  \"audio_state\": {audio_state}\n",
             "}}\n"
         ),
         now_ms = now_ms,
         connection = json_string(connection),
         source = json_string(&runtime.source_label),
+        source_kind = json_string(&runtime.source_kind),
         livekit_url = json_string(&runtime.livekit_url),
         room = json_string(&runtime.room),
         identity = json_string(&runtime.identity),
@@ -1922,11 +2366,22 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
         reconnects = reconnects,
         peak_l = peak_l,
         peak_r = peak_r,
+        rms_l = rms_l,
+        rms_r = rms_r,
+        last_audio_age_ms = last_audio_age_ms,
+        audio_state = json_string(audio_state),
     );
 
     let tmp_path = runtime.status_file.with_extension("json.tmp");
     fs::write(&tmp_path, body)?;
     fs::rename(tmp_path, &runtime.status_file)
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn json_string(value: &str) -> String {

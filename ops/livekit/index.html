@@ -145,7 +145,7 @@
 
       .meters {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
         gap: 10px;
       }
 
@@ -163,6 +163,13 @@
       .meter span {
         color: var(--muted);
         font-size: 13px;
+      }
+
+      .meter small {
+        display: block;
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 12px;
       }
 
       pre {
@@ -241,6 +248,12 @@
         <div class="meter"><b id="publisher">none</b><span>publisher</span></div>
         <div class="meter"><b id="track">none</b><span>track</span></div>
         <div class="meter"><b id="quality">unknown</b><span>connection</span></div>
+        <div class="meter"><b id="player">none</b><span>audio element</span></div>
+        <div class="meter"><b id="packets">0</b><span>packets received</span><small id="packetDelta">+0/s</small></div>
+        <div class="meter"><b id="bytes">0 B</b><span>bytes received</span><small id="byteDelta">+0 B/s</small></div>
+        <div class="meter"><b id="level">unknown</b><span>audio level</span></div>
+        <div class="meter"><b id="jitter">unknown</b><span>jitter</span></div>
+        <div class="meter"><b id="loss">unknown</b><span>packets lost</span></div>
       </section>
 
       <section>
@@ -267,9 +280,22 @@
       const publisherEl = document.getElementById("publisher");
       const trackEl = document.getElementById("track");
       const qualityEl = document.getElementById("quality");
+      const playerEl = document.getElementById("player");
+      const packetsEl = document.getElementById("packets");
+      const packetDeltaEl = document.getElementById("packetDelta");
+      const bytesEl = document.getElementById("bytes");
+      const byteDeltaEl = document.getElementById("byteDelta");
+      const levelEl = document.getElementById("level");
+      const jitterEl = document.getElementById("jitter");
+      const lossEl = document.getElementById("loss");
 
       let room;
       let audioNode;
+      let audioContext;
+      let currentAudioTrack;
+      let statsTimer;
+      let lastStats;
+      let playBlocked = false;
 
       function log(message) {
         const time = new Date().toLocaleTimeString();
@@ -282,10 +308,127 @@
       }
 
       function resetAudio() {
+        stopStats();
         audioEl.replaceChildren();
         audioNode = undefined;
+        currentAudioTrack = undefined;
+        playBlocked = false;
         publisherEl.textContent = "none";
         trackEl.textContent = "none";
+        playerEl.textContent = "none";
+        packetsEl.textContent = "0";
+        packetDeltaEl.textContent = "+0/s";
+        bytesEl.textContent = "0 B";
+        byteDeltaEl.textContent = "+0 B/s";
+        levelEl.textContent = "unknown";
+        jitterEl.textContent = "unknown";
+        lossEl.textContent = "unknown";
+      }
+
+      function formatBytes(value) {
+        const bytes = Number(value || 0);
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+      }
+
+      function updatePlayerState() {
+        if (!audioNode) {
+          playerEl.textContent = "none";
+          return;
+        }
+        const state = audioNode.paused ? "paused" : "playing";
+        const mute = audioNode.muted ? "muted" : "unmuted";
+        playerEl.textContent = `${state} / ${mute}`;
+        if (playBlocked) {
+          setStatus("audio blocked", "connected");
+        }
+      }
+
+      function stopStats() {
+        if (statsTimer) {
+          clearInterval(statsTimer);
+          statsTimer = undefined;
+        }
+        lastStats = undefined;
+      }
+
+      function pickInboundAudioStats(report) {
+        let inbound;
+        let audioLevel;
+        if (!report) return { inbound, audioLevel };
+        for (const stat of report.values()) {
+          const isAudio =
+            stat.kind === "audio" ||
+            stat.mediaType === "audio" ||
+            stat.trackIdentifier === currentAudioTrack?.mediaStreamTrack?.id;
+          if (stat.type === "inbound-rtp" && isAudio) {
+            inbound = stat;
+          }
+          if (typeof stat.audioLevel === "number") {
+            audioLevel = Math.max(audioLevel ?? 0, stat.audioLevel);
+          }
+        }
+        return { inbound, audioLevel };
+      }
+
+      async function updateStats() {
+        if (!currentAudioTrack) return;
+        try {
+          const report = await currentAudioTrack.getRTCStatsReport?.();
+          const { inbound, audioLevel } = pickInboundAudioStats(report);
+          const now = performance.now();
+          const packets = Number(inbound?.packetsReceived || 0);
+          const bytes = Number(inbound?.bytesReceived || 0);
+          const lost = inbound?.packetsLost;
+          const jitterSeconds = inbound?.jitter;
+          const elapsedSeconds = lastStats ? Math.max(0.1, (now - lastStats.at) / 1000) : 1;
+          const packetDelta = lastStats ? packets - lastStats.packets : 0;
+          const byteDelta = lastStats ? bytes - lastStats.bytes : 0;
+
+          packetsEl.textContent = String(packets);
+          packetDeltaEl.textContent = `+${Math.max(0, Math.round(packetDelta / elapsedSeconds))}/s`;
+          bytesEl.textContent = formatBytes(bytes);
+          byteDeltaEl.textContent = `+${formatBytes(Math.max(0, Math.round(byteDelta / elapsedSeconds)))}/s`;
+          lossEl.textContent = Number.isFinite(lost) ? String(lost) : "unknown";
+          jitterEl.textContent = Number.isFinite(jitterSeconds)
+            ? `${(jitterSeconds * 1000).toFixed(1)} ms`
+            : "unknown";
+          levelEl.textContent = Number.isFinite(audioLevel)
+            ? `${Math.round(audioLevel * 100)}%`
+            : "unknown";
+          updatePlayerState();
+
+          if (packetDelta > 0 && audioNode && !audioNode.paused && !playBlocked) {
+            setStatus("audio playing", "connected");
+          } else if (packetDelta > 0) {
+            setStatus("track subscribed", "connected");
+          } else if (lastStats && room?.state === ConnectionState.Connected) {
+            setStatus("no audio frames");
+          }
+
+          lastStats = { at: now, packets, bytes };
+        } catch (err) {
+          log(`stats unavailable: ${err.message || String(err)}`);
+        }
+      }
+
+      function startStats(track) {
+        stopStats();
+        currentAudioTrack = track;
+        statsTimer = setInterval(updateStats, 1000);
+        updateStats();
+      }
+
+      async function unlockAudioGesture() {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return;
+        if (!audioContext) {
+          audioContext = new AudioContextClass();
+        }
+        if (audioContext.state !== "running") {
+          await audioContext.resume();
+        }
       }
 
       function attachAudio(track, participant) {
@@ -298,7 +441,22 @@
         audioEl.replaceChildren(element);
         publisherEl.textContent = participant.identity || "unknown";
         trackEl.textContent = track.sid || "audio";
+        startStats(track);
+        element.addEventListener("playing", () => {
+          playBlocked = false;
+          updatePlayerState();
+          setStatus("audio playing", "connected");
+        });
+        element.addEventListener("pause", updatePlayerState);
+        element.addEventListener("waiting", () => setStatus("audio waiting"));
+        element.addEventListener("stalled", () => setStatus("audio stalled"));
+        element.addEventListener("error", () => {
+          setStatus("audio error", "failed");
+          log("audio element error");
+        });
         element.play().catch(() => {
+          playBlocked = true;
+          updatePlayerState();
           setStatus("tap Unlock Audio", "connected");
           log("audio is connected; tap Unlock Audio if iPhone blocks autoplay");
         });
@@ -335,13 +493,14 @@
           room = undefined;
         }
 
-        const { url, token, identity } = await getToken(passcode);
+        await unlockAudioGesture().catch(() => {});
+        const { url, token, identity, expiresInSeconds, permissions } = await getToken(passcode);
         room = new Room({ adaptiveStream: false, dynacast: false });
 
         room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
           log(`subscribed ${track.kind} from ${participant.identity}`);
           attachAudio(track, participant);
-          setStatus("listening", "connected");
+          setStatus("track subscribed", "connected");
         });
 
         room.on(RoomEvent.TrackUnsubscribed, (track) => {
@@ -354,10 +513,25 @@
           log(`participant ${participant.identity} joined`);
         });
 
+        room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+          log(`participant ${participant.identity} left`);
+          if (publisherEl.textContent === participant.identity) {
+            resetAudio();
+            setStatus("publisher offline");
+          }
+        });
+
+        room.on(RoomEvent.TrackSubscriptionFailed, (trackSid, participant, reason) => {
+          setStatus("subscription failed", "failed");
+          log(`subscription failed ${trackSid || ""} ${reason || ""}`.trim());
+        });
+
         room.on(RoomEvent.ConnectionStateChanged, (state) => {
           qualityEl.textContent = state;
           if (state === ConnectionState.Connected) {
             setStatus("waiting for audio", "connected");
+          } else if (state === ConnectionState.Reconnecting) {
+            setStatus("reconnecting");
           }
         });
 
@@ -368,7 +542,8 @@
         });
 
         await room.connect(url, token, { autoSubscribe: true });
-        log(`connected as ${identity}`);
+        const canPublish = room.localParticipant?.permissions?.canPublish ?? permissions?.canPublish;
+        log(`connected as ${identity}; token expires in ${expiresInSeconds || "unknown"}s; canPublish=${canPublish === true ? "true" : "false"}`);
         listenButton.disabled = false;
       }
 
@@ -400,9 +575,14 @@
           return;
         }
         try {
+          await unlockAudioGesture().catch(() => {});
           await audioNode.play();
+          playBlocked = false;
+          updatePlayerState();
           setStatus("listening", "connected");
         } catch (err) {
+          playBlocked = true;
+          updatePlayerState();
           log(err.message || String(err));
         }
       });

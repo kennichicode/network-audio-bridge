@@ -165,9 +165,10 @@ nab-live --source plugin
 主な送信設定:
 
 ```bash
-nab-live --source plugin --profile concert
-nab-live --source plugin --profile balanced
+nab-live --source plugin --profile stable-music
+nab-live --source plugin --profile hi-fi-music
 nab-live --source plugin --profile low-bandwidth --bitrate 96000
+nab-live --source test-tone --test-tone-hz 1000 --test-tone-dbfs=-18
 nab-live --source plugin --disable-red
 nab-live --source plugin --enable-dtx
 ```
@@ -176,17 +177,28 @@ nab-live --source plugin --enable-dtx
 
 | profile | bitrate | RED | DTX | LiveKit queue | 用途 |
 |---------|---------|-----|-----|---------------|------|
-| concert | 256 kbps | on | off | 1000 ms | REAPER Masterの音楽モニター標準 |
-| balanced | 160 kbps | on | off | 1200 ms | 回線に余裕が少ない時 |
+| stable-music | 160 kbps | on | off | 1200 ms | 標準。まず切れにくさ優先 |
+| hi-fi-music | 256 kbps | on | off | 1000 ms | 安定回線で音質優先 |
 | speech | 64 kbps | on | on | 800 ms | 会話・確認用 |
 | low-bandwidth | 96 kbps | on | off | 1500 ms | 厳しい回線で音楽を切らさない方向 |
+| max-quality-lab | 510 kbps | off | off | 1000 ms | 実験用。通常運用では使わない |
 
 Mac miniでの通常手順:
 
 1. `NAB Tap Installer.command` を一度実行する。
 2. REAPERを起動し、Master FXまたはMonitor FXに `VST3: NAB Tap (Kenichi Kawabata)` を挿す。
 3. `NAB Live Sender.command` を開いたままにする。
-4. ブラウザで `https://livekit.kenichi-kawabata.com/` を開く。
+4. `NAB Live Status.command` で `AUDIO IS MOVING NOW` を見る。
+5. ブラウザで `https://livekit.kenichi-kawabata.com/` を開き、数字の合言葉で `Listen`。
+
+安全設計:
+
+- `NAB Live Sender.command` は既存senderがある場合、二重起動せずPIDと状態だけ表示します。
+- `nab-live` 本体にも room/identity lock と NAB Tap socket lock があります。
+- `kill` / SIGTERM 時も lock/socket を掃除し、再起動時に古いsocketで詰まらないようにしています。
+- `NAB Live Status.command` は接続だけでなく、2秒間の `tap_packets` / `captured_frames` / `sent_frames` / RMS / peak の増加を見ます。
+- `https://livekit.kenichi-kawabata.com/` は購読専用ページです。listener token は `canPublish=false`, `canSubscribe=true`, 短寿命TTLです。
+- listen pageは受信packet/bytes/jitter/audio level/audio element状態を表示します。
 
 プラグインのビルド:
 
