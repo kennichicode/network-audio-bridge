@@ -46,6 +46,7 @@ const OUT_CHANNELS: usize = 2;
 const OUT_FRAME_MS: u32 = 10;
 const OUT_FRAMES_PER_PACKET: usize = (OUT_RATE as usize * OUT_FRAME_MS as usize) / 1000;
 const MAX_INPUT_BLOCK_WAIT_MS: u64 = 30;
+const MAX_INPUT_LATENCY_MS: usize = 750;
 
 const TAP_MAGIC: &[u8; 8] = b"NABTAP1\0";
 const TAP_VERSION: u32 = 1;
@@ -1852,6 +1853,8 @@ impl AudioPump {
             return Ok(());
         }
 
+        self.trim_input_latency(cons, state);
+
         let wait_start = Instant::now();
         while cons.len() < needed_samples
             && wait_start.elapsed() < Duration::from_millis(MAX_INPUT_BLOCK_WAIT_MS)
@@ -1921,6 +1924,39 @@ impl AudioPump {
             .fetch_add(output_frames as u64, Ordering::Relaxed);
         Ok(())
     }
+
+    fn trim_input_latency(
+        &mut self,
+        cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
+        state: &State,
+    ) {
+        let max_samples = (self.input_rate as usize * OUT_CHANNELS * MAX_INPUT_LATENCY_MS) / 1000;
+        let buffered = cons.len();
+        if buffered <= max_samples {
+            return;
+        }
+
+        let mut to_drop = buffered - max_samples;
+        to_drop -= to_drop % OUT_CHANNELS;
+        let mut dropped = 0usize;
+        while to_drop > 0 {
+            let chunk = to_drop.min(self.input_interleaved.len());
+            let popped = cons.pop_slice(&mut self.input_interleaved[..chunk]);
+            if popped == 0 {
+                break;
+            }
+            dropped += popped;
+            to_drop -= popped;
+        }
+        if dropped > 0 {
+            state
+                .overflow_frames
+                .fetch_add((dropped / OUT_CHANNELS) as u64, Ordering::Relaxed);
+            state
+                .ring_buffer_ms
+                .store(MAX_INPUT_LATENCY_MS, Ordering::Relaxed);
+        }
+    }
 }
 
 async fn run_plain_loop(
@@ -1933,6 +1969,8 @@ async fn run_plain_loop(
     events: &mut UnboundedReceiver<RoomEvent>,
 ) -> AppResult<LoopExit> {
     let mut status_tick = tokio::time::interval(Duration::from_secs(2));
+    let mut send_tick = tokio::time::interval(Duration::from_millis(OUT_FRAME_MS as u64));
+    send_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
     #[cfg(unix)]
@@ -1969,8 +2007,8 @@ async fn run_plain_loop(
                 let _ = refresh_local_track_stats(local_track, state).await;
                 print_status(state, runtime);
             }
-            result = pump.send_next_frame(cons, native_source, state) => {
-                result?;
+            _ = send_tick.tick() => {
+                pump.send_next_frame(cons, native_source, state).await?;
             }
         }
     }
@@ -2030,6 +2068,8 @@ async fn run_status_tui_inner(
 ) -> AppResult<LoopExit> {
     let mut draw_tick = tokio::time::interval(Duration::from_millis(100));
     let mut status_tick = tokio::time::interval(Duration::from_secs(1));
+    let mut send_tick = tokio::time::interval(Duration::from_millis(OUT_FRAME_MS as u64));
+    send_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
     #[cfg(unix)]
@@ -2085,8 +2125,8 @@ async fn run_status_tui_inner(
                 let _ = refresh_local_track_stats(local_track, state).await;
                 let _ = write_status_file(state, runtime);
             }
-            result = pump.send_next_frame(cons, native_source, state) => {
-                result?;
+            _ = send_tick.tick() => {
+                pump.send_next_frame(cons, native_source, state).await?;
             }
         }
     }
