@@ -4,7 +4,8 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:${PATH:-}"
 path=(/usr/bin /bin /usr/sbin /sbin /opt/homebrew/bin $path)
 hash -r
 
-BIN="$HOME/NetworkAudioBridge/nab-live"
+BIN="$HOME/NetworkAudioBridge/nab-tap-whip-sender"
+OLD_BIN="$HOME/NetworkAudioBridge/nab-live"
 STATUS_FILE="$HOME/.nab/status.json"
 SOCKET="$HOME/Library/Caches/KenichiNAB/nab-tap.sock"
 LOCK="$SOCKET.lock"
@@ -17,7 +18,10 @@ echo "==============="
 echo ""
 
 sender_pids() {
-  pgrep -f "$BIN" 2>/dev/null || true
+  {
+    pgrep -f "$BIN" 2>/dev/null || true
+    pgrep -f "$OLD_BIN" 2>/dev/null || true
+  } | sort -u
 }
 
 read_status() {
@@ -49,6 +53,7 @@ print(json.dumps({
     "bitrate_bps": data.get("bitrate_bps", 0),
     "red_enabled": data.get("red_enabled"),
     "dtx_enabled": data.get("dtx_enabled"),
+    "opus_fec_mode": data.get("opus_fec_mode", "auto"),
     "audio_state": data.get("audio_state", "unknown"),
     "last_audio_frame_age_ms": data.get("last_audio_frame_age_ms", -1),
     "captured_frames": data.get("captured_frames", 0),
@@ -278,8 +283,12 @@ active_audio = b["audio_state"] == "active" and max(
     b["rms_right_milli"],
 ) > 1
 
+waiting_for_tap = b["source_kind"] == "plugin" and int(b.get("tap_packets", 0)) == 0
+
 if b["connection"] != "Connected":
     print("Result     : NOT READY. Sender is not connected to LiveKit.")
+elif waiting_for_tap and rtp_moving:
+    print("Result     : TRANSPORT READY. LiveKit/WHIP/RTP is alive; waiting for REAPER/NAB Tap audio.")
 elif audio_moving and rtp_moving and has_listener and active_audio:
     print("Result     : LIVE AUDIO IS MOVING TO A LISTENER NOW.")
 elif audio_moving and rtp_moving and has_listener:

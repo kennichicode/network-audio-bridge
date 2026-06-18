@@ -7,6 +7,7 @@ APP_DIR="${NAB_APP_DIR:-$HOME/NetworkAudioBridge}"
 DESKTOP_DIR="$HOME/Desktop"
 TOOLS_DIR="$DESKTOP_DIR/NAB Live Tools"
 VST3_BUILD="$REPO_ROOT/plugins/nab-tap/build/NABTap_artefacts/Release/VST3/NAB Tap.vst3"
+WHIP_BUILD="${NAB_WHIP_BUILD:-$REPO_ROOT/../StageDAW-Recorder/build/nab-tap-whip-sender_artefacts/Release/nab-tap-whip-sender}"
 
 need_file() {
   if [[ ! -f "$1" ]]; then
@@ -23,11 +24,13 @@ need_dir() {
 }
 
 need_file "$REPO_ROOT/target/release/nab-live"
+need_file "$WHIP_BUILD"
 need_dir "$VST3_BUILD"
 
 mkdir -p "$APP_DIR/plugins/nab-tap" "$APP_DIR/tools" "$DESKTOP_DIR" "$TOOLS_DIR" "$HOME/Applications"
 
 install -m 755 "$REPO_ROOT/target/release/nab-live" "$APP_DIR/nab-live"
+install -m 755 "$WHIP_BUILD" "$APP_DIR/nab-tap-whip-sender"
 
 if [[ -f "$REPO_ROOT/target/release/nab" ]]; then
   install -m 755 "$REPO_ROOT/target/release/nab" "$APP_DIR/nab"
@@ -87,7 +90,8 @@ rm -f \
 
 echo ""
 echo "Installed NAB Live runtime:"
-echo "  $APP_DIR/nab-live"
+echo "  $APP_DIR/nab-tap-whip-sender"
+echo "  $APP_DIR/nab-live (legacy fallback, not normal sender)"
 echo "  $APP_DIR/plugins/nab-tap/NAB Tap.vst3"
 echo ""
 echo "Launchers:"

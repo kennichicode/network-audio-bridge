@@ -6,7 +6,8 @@ hash -r
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$HOME/NetworkAudioBridge"
-BIN="$APP_DIR/nab-live"
+BIN="$APP_DIR/nab-tap-whip-sender"
+OLD_BIN="$APP_DIR/nab-live"
 ENV_FILE="$HOME/.config/kenichi-vps/livekit.env"
 VST3_SRC="$APP_DIR/plugins/nab-tap/NAB Tap.vst3"
 VST3_DST="$HOME/Library/Audio/Plug-Ins/VST3/NAB Tap.vst3"
@@ -30,9 +31,12 @@ check_install() {
   echo "Current install check"
   echo "---------------------"
   if [[ -x "$BIN" ]]; then
-    ok_line "nab-live binary: $BIN"
+    ok_line "StageDAW WHIP sender binary: $BIN"
   else
-    ng_line "nab-live binary missing: $BIN"
+    ng_line "StageDAW WHIP sender binary missing: $BIN"
+  fi
+  if [[ -x "$OLD_BIN" ]]; then
+    ok_line "legacy nab-live binary is present but not used for normal sending: $OLD_BIN"
   fi
   if [[ -d "$VST3_SRC" ]]; then
     ok_line "bundled NAB Tap: $VST3_SRC"

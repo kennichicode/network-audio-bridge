@@ -4,7 +4,8 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:${PATH:-}"
 path=(/usr/bin /bin /usr/sbin /sbin /opt/homebrew/bin $path)
 hash -r
 
-BIN="$HOME/NetworkAudioBridge/nab-live"
+BIN="$HOME/NetworkAudioBridge/nab-tap-whip-sender"
+OLD_BIN="$HOME/NetworkAudioBridge/nab-live"
 ENV_FILE="$HOME/.config/kenichi-vps/livekit.env"
 PLUGIN="$HOME/Library/Audio/Plug-Ins/VST3/NAB Tap.vst3"
 SOCKET="$HOME/Library/Caches/KenichiNAB/nab-tap.sock"
@@ -12,9 +13,7 @@ STATUS_FILE="$HOME/.nab/status.json"
 RUNTIME_LOCK="$HOME/.nab/locks/nab-live-reaper-master-nab-live-mac-mini.lock"
 PROFILE="${NAB_LIVE_PROFILE:-stable-music}"
 BITRATE="${NAB_LIVE_BITRATE:-}"
-LIVEKIT_BUFFER_MS="${NAB_LIVE_BUFFER_MS:-}"
-RED_DISABLED="${NAB_LIVE_DISABLE_RED:-}"
-DTX_ENABLED="${NAB_LIVE_ENABLE_DTX:-}"
+FEC_DISABLED="${NAB_LIVE_DISABLE_FEC:-}"
 
 env_value() {
   local key="$1"
@@ -93,7 +92,10 @@ PY
 }
 
 sender_pids() {
-  pgrep -f "$BIN" 2>/dev/null || true
+  {
+    pgrep -f "$BIN" 2>/dev/null || true
+    pgrep -f "$OLD_BIN" 2>/dev/null || true
+  } | sort -u
 }
 
 stop_senders() {
@@ -165,34 +167,24 @@ fi
 mkdir -p "$(dirname "$SOCKET")" "$(dirname "$STATUS_FILE")" "$(dirname "$RUNTIME_LOCK")"
 
 args=(
-  --source plugin
   --plugin-socket "$SOCKET"
   --status-file "$STATUS_FILE"
   --env-file "$ENV_FILE"
   --room "reaper-master"
   --identity "nab-live-mac-mini"
-  --profile "$PROFILE"
 )
 
 if [[ -n "$BITRATE" ]]; then
   args+=(--bitrate "$BITRATE")
 fi
 
-if [[ -n "$LIVEKIT_BUFFER_MS" ]]; then
-  args+=(--livekit-buffer-ms "$LIVEKIT_BUFFER_MS")
-fi
-
-if [[ -n "$RED_DISABLED" ]]; then
-  args+=(--disable-red)
-fi
-
-if [[ -n "$DTX_ENABLED" ]]; then
-  args+=(--enable-dtx)
+if [[ -n "$FEC_DISABLED" ]]; then
+  args+=(--no-fec)
 fi
 
 echo "Starting one NAB Live Sender..."
-echo "Profile: $PROFILE"
-echo "Default: stable-music = 256 kbps / RED on / Opus FEC auto / DTX off"
+echo "Engine : StageDAW WHIP/libdatachannel sender"
+echo "Default: 256 kbps / Opus stereo / FEC on / DTX off"
 echo "Socket : $SOCKET"
 echo "Status : $STATUS_FILE"
 echo ""
