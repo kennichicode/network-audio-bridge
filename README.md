@@ -192,9 +192,16 @@ Mac miniでの通常手順:
 5. ブラウザで `https://livekit.kenichi-kawabata.com/` を開き、数字の合言葉で `Listen`。
 6. listener接続後、`NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` を見る。
 
+REAPERなしでiPhone/browserだけ確認したい時:
+
+1. `NAB Live Test Tone.command` を開く。
+2. iPhone/browserで `https://livekit.kenichi-kawabata.com/` を開き、`Listen`。
+3. `NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` を見る。
+
 安全設計:
 
 - `NAB Tap Installer.command` はSenderを起動せず、VST3 / nab-live binary / Sender command / Status command / LiveKit token API を確認できます。`INSTALL` を入力した時だけVST3を再インストールします。
+- `NAB Live Test Tone.command` はREAPER/NAB Tapを使わず、10分間の1kHz/-18dBFS test toneをLiveKitへ送ります。iPhone/browserの実音確認用です。
 - `NAB Live Sender.command` は既存senderがある場合、二重起動せずPIDと状態だけ表示します。
 - `nab-live` 本体にも room/identity lock と NAB Tap socket lock があります。
 - `kill` / SIGTERM 時も lock/socket を掃除し、再起動時に古いsocketで詰まらないようにしています。

@@ -9,6 +9,7 @@ VST3_SRC="$APP_DIR/plugins/nab-tap/NAB Tap.vst3"
 VST3_DST="$HOME/Library/Audio/Plug-Ins/VST3/NAB Tap.vst3"
 SENDER="$HOME/Desktop/NAB Live Sender.command"
 STATUS="$HOME/Desktop/NAB Live Status.command"
+TEST_TONE="$HOME/Desktop/NAB Live Test Tone.command"
 TOKEN_HEALTH_URL="https://livekit.kenichi-kawabata.com/healthz"
 
 ok_line() {
@@ -46,6 +47,11 @@ check_install() {
     ok_line "Status command: $STATUS"
   else
     ng_line "Status command missing: $STATUS"
+  fi
+  if [[ -x "$TEST_TONE" ]]; then
+    ok_line "Test tone command: $TEST_TONE"
+  else
+    ng_line "Test tone command missing: $TEST_TONE"
   fi
   if [[ -f "$ENV_FILE" ]]; then
     ok_line "LiveKit env file: $ENV_FILE"
