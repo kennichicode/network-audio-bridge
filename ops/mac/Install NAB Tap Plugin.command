@@ -11,6 +11,7 @@ SENDER="$HOME/Desktop/NAB Live Sender.command"
 STATUS="$HOME/Desktop/NAB Live Status.command"
 TEST_TONE="$HOME/Desktop/NAB Live Test Tone.command"
 IPHONE_CHECK="$HOME/Desktop/NAB Live iPhone Check.command"
+RME_PREFLIGHT="$HOME/Desktop/NAB Live RME Preflight.command"
 TOKEN_HEALTH_URL="https://livekit.kenichi-kawabata.com/healthz"
 
 ok_line() {
@@ -58,6 +59,11 @@ check_install() {
     ok_line "iPhone check command: $IPHONE_CHECK"
   else
     ng_line "iPhone check command missing: $IPHONE_CHECK"
+  fi
+  if [[ -x "$RME_PREFLIGHT" ]]; then
+    ok_line "RME preflight command: $RME_PREFLIGHT"
+  else
+    ng_line "RME preflight command missing: $RME_PREFLIGHT"
   fi
   if [[ -f "$ENV_FILE" ]]; then
     ok_line "LiveKit env file: $ENV_FILE"

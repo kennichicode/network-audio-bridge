@@ -46,6 +46,7 @@ for file in \
   "Start NAB Live Wizard.command" \
   "NAB Live Test Tone.command" \
   "NAB Live iPhone Check.command" \
+  "NAB Live RME Preflight.command" \
   "NAB Live Status.command"; do
   install -m 755 "$REPO_ROOT/ops/mac/$file" "$APP_DIR/$file"
 done
@@ -54,6 +55,7 @@ install -m 755 "$APP_DIR/Start NAB Live Only.command" "$DESKTOP_DIR/NAB Live Sen
 install -m 755 "$APP_DIR/NAB Live Status.command" "$DESKTOP_DIR/NAB Live Status.command"
 install -m 755 "$APP_DIR/NAB Live Test Tone.command" "$DESKTOP_DIR/NAB Live Test Tone.command"
 install -m 755 "$APP_DIR/NAB Live iPhone Check.command" "$DESKTOP_DIR/NAB Live iPhone Check.command"
+install -m 755 "$APP_DIR/NAB Live RME Preflight.command" "$DESKTOP_DIR/NAB Live RME Preflight.command"
 install -m 755 "$APP_DIR/Install NAB Tap Plugin.command" "$DESKTOP_DIR/NAB Tap Installer.command"
 rm -f "$DESKTOP_DIR/NAB Live Wizard.command"
 
@@ -62,6 +64,7 @@ install -m 755 "$APP_DIR/Start NAB Live Wizard.command" "$HOME/Applications/NAB 
 install -m 755 "$APP_DIR/NAB Live Status.command" "$HOME/Applications/NAB Live Status.command"
 install -m 755 "$APP_DIR/NAB Live Test Tone.command" "$HOME/Applications/NAB Live Test Tone.command"
 install -m 755 "$APP_DIR/NAB Live iPhone Check.command" "$HOME/Applications/NAB Live iPhone Check.command"
+install -m 755 "$APP_DIR/NAB Live RME Preflight.command" "$HOME/Applications/NAB Live RME Preflight.command"
 install -m 755 "$APP_DIR/Install NAB Tap Plugin.command" "$HOME/Applications/NAB Tap Installer.command"
 
 "$APP_DIR/install-nab-tap-plugin.sh" "$APP_DIR/plugins/nab-tap"
@@ -76,4 +79,5 @@ echo "  $DESKTOP_DIR/NAB Live Sender.command"
 echo "  $DESKTOP_DIR/NAB Live Status.command"
 echo "  $DESKTOP_DIR/NAB Live Test Tone.command"
 echo "  $DESKTOP_DIR/NAB Live iPhone Check.command"
+echo "  $DESKTOP_DIR/NAB Live RME Preflight.command"
 echo "  $DESKTOP_DIR/NAB Tap Installer.command"

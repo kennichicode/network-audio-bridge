@@ -118,7 +118,14 @@ if last:
     packets = last.get("packets", 0)
     level = last.get("level", "unknown")
     loss = last.get("loss", "unknown")
-    print(f"ListenerProof: {device} / {proof} / {player} / age={age}s")
+    try:
+        stale = int(age) > 30
+    except Exception:
+        stale = True
+    if stale:
+        print(f"LastListenerProof: stale / {device} / {proof} / {player} / age={age}s")
+    else:
+        print(f"ListenerProof: {device} / {proof} / {player} / age={age}s")
     print(f"  track={track} packets={packets} level={level} loss={loss}")
 else:
     print("ListenerProof: none yet")
