@@ -54,6 +54,9 @@ print(json.dumps({
     "red_enabled": data.get("red_enabled"),
     "dtx_enabled": data.get("dtx_enabled"),
     "opus_fec_mode": data.get("opus_fec_mode", "auto"),
+    "input_rate": data.get("input_rate", 0),
+    "output_rate": data.get("output_rate", 48000),
+    "queue_ms": data.get("queue_ms", 0),
     "audio_state": data.get("audio_state", "unknown"),
     "last_audio_frame_age_ms": data.get("last_audio_frame_age_ms", -1),
     "captured_frames": data.get("captured_frames", 0),
@@ -73,6 +76,10 @@ print(json.dumps({
     "listener_identities": data.get("listener_identities", []),
     "overflow_frames": data.get("overflow_frames", 0),
     "underruns": data.get("underruns", 0),
+    "underflow_frames": data.get("underflow_frames", 0),
+    "src_short_blocks": data.get("src_short_blocks", 0),
+    "src_padded_frames": data.get("src_padded_frames", 0),
+    "src_unused_input_frames": data.get("src_unused_input_frames", 0),
     "input_errors": data.get("input_errors", 0),
     "livekit_errors": data.get("livekit_errors", 0),
     "reconnects": data.get("reconnects", 0),
@@ -226,6 +233,10 @@ rtp_byte_delta = delta("rtp_bytes_sent")
 problem_total = (
     b["overflow_frames"]
     + b["underruns"]
+    + b["underflow_frames"]
+    + b["src_short_blocks"]
+    + b["src_padded_frames"]
+    + b["src_unused_input_frames"]
     + b["input_errors"]
     + b["livekit_errors"]
     + b["plugin_reported_drops"]
@@ -234,6 +245,10 @@ problem_total = (
 problem_delta = (
     delta("overflow_frames")
     + delta("underruns")
+    + delta("underflow_frames")
+    + delta("src_short_blocks")
+    + delta("src_padded_frames")
+    + delta("src_unused_input_frames")
     + delta("input_errors")
     + delta("livekit_errors")
     + delta("plugin_reported_drops")
@@ -253,6 +268,7 @@ print(f"LiveKit    : {b['livekit_url']}")
 print(f"Listen     : {b['listen_url']}")
 print(f"Log        : {b['log_path'] or 'unknown'}")
 print(f"Profile    : {b['profile']} / {int(b['bitrate_bps'] / 1000)} kbps / RED={b['red_enabled']} / FEC={b.get('opus_fec_mode', 'auto')} / DTX={b['dtx_enabled']}")
+print(f"Signal     : input={b['input_rate']} Hz -> output={b['output_rate']} Hz / queue={b['queue_ms']} ms")
 print(f"AudioState : {b['audio_state']} / lastAudioAge={b['last_audio_frame_age_ms']} ms")
 print(f"RTP Stats  : age={b['last_rtp_stats_age_ms']} ms / errors={b['rtp_stats_errors']}")
 print(f"Listeners  : {b['subscriber_count']}  [{listeners_text}]")
@@ -263,13 +279,15 @@ print(f"  VST3 packets: +{tap_delta}" if b["source_kind"] == "plugin" else f"  V
 print(f"  Captured    : +{captured_delta} frames")
 print(f"  Sent        : +{sent_delta} frames")
 print(f"  Dropped     : total={b['frames_dropped_total']}  pluginDrops={b['plugin_reported_drops']}  overflow={b['overflow_frames']}")
+print(f"  Input wait  : underrunBlocks={b['underruns']} underflowFrames={b['underflow_frames']}")
+print(f"  SRC         : shortBlocks={b['src_short_blocks']} paddedFrames={b['src_padded_frames']} unusedInputFrames={b['src_unused_input_frames']}")
 print(f"  RTP packets : +{rtp_packet_delta}  total={b['rtp_packets_sent']}")
 print(f"  RTP bytes   : +{rtp_byte_delta}  total={b['rtp_bytes_sent']}")
 print(f"  RTP retrans : packets={b['rtp_retransmitted_packets_sent']} bytes={b['rtp_retransmitted_bytes_sent']}")
 print(f"  Peak now    : L {b['peak_left_milli']}/1000  R {b['peak_right_milli']}/1000")
 print(f"  RMS now     : L {b['rms_left_milli']}/1000  R {b['rms_right_milli']}/1000")
 print("")
-print(f"Problems total: overflow={b['overflow_frames']} underrun={b['underruns']} inputErr={b['input_errors']} livekitErr={b['livekit_errors']} reconnect={b['reconnects']} tapGaps={b['tap_sequence_gaps']} pluginDrops={b['plugin_reported_drops']} rtpStatsErr={b['rtp_stats_errors']}")
+print(f"Problems total: overflow={b['overflow_frames']} underrun={b['underruns']} underflowFrames={b['underflow_frames']} srcShort={b['src_short_blocks']} srcPadded={b['src_padded_frames']} srcUnused={b['src_unused_input_frames']} inputErr={b['input_errors']} livekitErr={b['livekit_errors']} reconnect={b['reconnects']} tapGaps={b['tap_sequence_gaps']} pluginDrops={b['plugin_reported_drops']} rtpStatsErr={b['rtp_stats_errors']}")
 print(f"Problems +2s : {problem_delta}  tapGaps +2s={tap_gap_delta}")
 print("")
 
