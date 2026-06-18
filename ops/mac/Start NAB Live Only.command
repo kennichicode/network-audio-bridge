@@ -44,7 +44,7 @@ print_header() {
   echo "==============="
   echo ""
   echo "Route:"
-  echo "  REAPER Master -> NAB Tap VST3 -> nab-live -> LiveKit/VPS -> browser"
+  echo "  REAPER Master -> NAB Tap VST3 -> StageDAW WHIP Sender -> LiveKit/VPS -> browser"
   echo ""
   echo "Listen:"
   echo "  https://livekit.kenichi-kawabata.com/"
