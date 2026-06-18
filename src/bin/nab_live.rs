@@ -10,6 +10,7 @@ use livekit::options::{AudioEncoding, TrackPublishOptions};
 use livekit::prelude::*;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use livekit::webrtc::prelude::{AudioFrame, AudioSourceOptions};
+use livekit::webrtc::stats::RtcStats;
 use livekit_api::access_token::{AccessToken, VideoGrants};
 use ratatui::{
     backend::CrosstermBackend,
@@ -20,12 +21,12 @@ use ratatui::{
 };
 use ringbuf::HeapRb;
 use rubato::{FftFixedInOut, Resampler};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -291,6 +292,16 @@ struct State {
     tap_packets: AtomicU64,
     tap_seq_gaps: AtomicU64,
     tap_reported_drops: AtomicU64,
+    rtp_packets_sent: AtomicU64,
+    rtp_bytes_sent: AtomicU64,
+    rtp_header_bytes_sent: AtomicU64,
+    rtp_retransmitted_packets_sent: AtomicU64,
+    rtp_retransmitted_bytes_sent: AtomicU64,
+    rtp_stats_errors: AtomicU64,
+    last_rtp_stats_unix_ms: AtomicU64,
+    subscriber_count: AtomicUsize,
+    listener_identities: Mutex<HashSet<String>>,
+    published_track_sid: Mutex<String>,
 }
 
 struct CaptureSetup {
@@ -610,6 +621,7 @@ async fn run_livekit_session(
         "reaper-master",
         RtcAudioSource::Native(native_source.clone()),
     );
+    let stats_track = track.clone();
     let publication = room
         .local_participant()
         .publish_track(
@@ -626,16 +638,43 @@ async fn run_livekit_session(
         )
         .await?;
     let publication_sid = publication.sid().clone();
+    reset_livekit_session_stats(state);
+    set_published_track_sid(state, publication.sid().as_str());
+    sync_listener_identities(
+        state,
+        room.remote_participants()
+            .values()
+            .map(|participant| participant.identity().to_string()),
+    );
     state
         .connection_state
         .store(CONNECTION_CONNECTED, Ordering::Relaxed);
     eprintln!("Published track SID: {}", publication.sid());
+    let _ = refresh_local_track_stats(&stats_track, state).await;
     let _ = write_status_file(state, runtime);
 
     let loop_result = if use_tui {
-        run_status_tui(runtime, pump, cons, &native_source, state, &mut events).await
+        run_status_tui(
+            runtime,
+            pump,
+            cons,
+            &native_source,
+            &stats_track,
+            state,
+            &mut events,
+        )
+        .await
     } else {
-        run_plain_loop(runtime, pump, cons, &native_source, state, &mut events).await
+        run_plain_loop(
+            runtime,
+            pump,
+            cons,
+            &native_source,
+            &stats_track,
+            state,
+            &mut events,
+        )
+        .await
     };
 
     let _ = room
@@ -686,10 +725,43 @@ async fn wait_before_reconnect(delay: Duration) -> bool {
 
 fn handle_room_event(event: RoomEvent, state: &State) -> bool {
     match event {
+        RoomEvent::ParticipantConnected(participant)
+        | RoomEvent::ParticipantActive(participant) => {
+            add_listener_identity(state, participant.identity().to_string());
+            log::log(&format!(
+                "LiveKit listener joined: {}",
+                participant.identity()
+            ));
+            false
+        }
+        RoomEvent::ParticipantDisconnected(participant) => {
+            remove_listener_identity(state, participant.identity().as_str());
+            log::log(&format!(
+                "LiveKit listener left: {}",
+                participant.identity()
+            ));
+            false
+        }
+        RoomEvent::Connected {
+            participants_with_tracks,
+        } => {
+            sync_listener_identities(
+                state,
+                participants_with_tracks
+                    .iter()
+                    .map(|(participant, _)| participant.identity().to_string()),
+            );
+            state
+                .connection_state
+                .store(CONNECTION_CONNECTED, Ordering::Relaxed);
+            log::log("LiveKit connected");
+            false
+        }
         RoomEvent::Disconnected { reason } => {
             state
                 .connection_state
                 .store(CONNECTION_DISCONNECTED, Ordering::Relaxed);
+            sync_listener_identities(state, std::iter::empty::<String>());
             log::log(&format!("LiveKit disconnected: {reason:?}"));
             true
         }
@@ -700,7 +772,7 @@ fn handle_room_event(event: RoomEvent, state: &State) -> bool {
             log::log("LiveKit reconnecting");
             false
         }
-        RoomEvent::Reconnected | RoomEvent::Connected { .. } => {
+        RoomEvent::Reconnected => {
             state
                 .connection_state
                 .store(CONNECTION_CONNECTED, Ordering::Relaxed);
@@ -714,6 +786,9 @@ fn handle_room_event(event: RoomEvent, state: &State) -> bool {
                 ConnectionState::Reconnecting => CONNECTION_RECONNECTING,
             };
             state.connection_state.store(value, Ordering::Relaxed);
+            if connection_state == ConnectionState::Disconnected {
+                sync_listener_identities(state, std::iter::empty::<String>());
+            }
             log::log(&format!(
                 "LiveKit connection state changed: {connection_state:?}"
             ));
@@ -728,6 +803,151 @@ fn handle_room_event(event: RoomEvent, state: &State) -> bool {
             false
         }
     }
+}
+
+async fn refresh_local_track_stats(local_track: &LocalAudioTrack, state: &State) -> AppResult<()> {
+    match local_track.get_stats().await {
+        Ok(stats) => {
+            let mut found_audio = false;
+            let mut packets_sent = 0_u64;
+            let mut bytes_sent = 0_u64;
+            let mut header_bytes_sent = 0_u64;
+            let mut retransmitted_packets_sent = 0_u64;
+            let mut retransmitted_bytes_sent = 0_u64;
+
+            for stat in stats {
+                if let RtcStats::OutboundRtp(outbound) = stat {
+                    if outbound.stream.kind.is_empty() || outbound.stream.kind == "audio" {
+                        found_audio = true;
+                        packets_sent = packets_sent.saturating_add(outbound.sent.packets_sent);
+                        bytes_sent = bytes_sent.saturating_add(outbound.sent.bytes_sent);
+                        header_bytes_sent =
+                            header_bytes_sent.saturating_add(outbound.outbound.header_bytes_sent);
+                        retransmitted_packets_sent = retransmitted_packets_sent
+                            .saturating_add(outbound.outbound.retransmitted_packets_sent);
+                        retransmitted_bytes_sent = retransmitted_bytes_sent
+                            .saturating_add(outbound.outbound.retransmitted_bytes_sent);
+                    }
+                }
+            }
+
+            if found_audio {
+                state
+                    .rtp_packets_sent
+                    .store(packets_sent, Ordering::Relaxed);
+                state.rtp_bytes_sent.store(bytes_sent, Ordering::Relaxed);
+                state
+                    .rtp_header_bytes_sent
+                    .store(header_bytes_sent, Ordering::Relaxed);
+                state
+                    .rtp_retransmitted_packets_sent
+                    .store(retransmitted_packets_sent, Ordering::Relaxed);
+                state
+                    .rtp_retransmitted_bytes_sent
+                    .store(retransmitted_bytes_sent, Ordering::Relaxed);
+                state
+                    .last_rtp_stats_unix_ms
+                    .store(now_unix_ms() as u64, Ordering::Relaxed);
+                Ok(())
+            } else {
+                Ok(())
+            }
+        }
+        Err(err) => {
+            state.rtp_stats_errors.fetch_add(1, Ordering::Relaxed);
+            log::log(&format!("LiveKit stats error: {err}"));
+            Err(err.into())
+        }
+    }
+}
+
+fn reset_livekit_session_stats(state: &State) {
+    state.rtp_packets_sent.store(0, Ordering::Relaxed);
+    state.rtp_bytes_sent.store(0, Ordering::Relaxed);
+    state.rtp_header_bytes_sent.store(0, Ordering::Relaxed);
+    state
+        .rtp_retransmitted_packets_sent
+        .store(0, Ordering::Relaxed);
+    state
+        .rtp_retransmitted_bytes_sent
+        .store(0, Ordering::Relaxed);
+    state.last_rtp_stats_unix_ms.store(0, Ordering::Relaxed);
+    state.subscriber_count.store(0, Ordering::Relaxed);
+    set_published_track_sid(state, "");
+    sync_listener_identities(state, std::iter::empty::<String>());
+}
+
+fn set_published_track_sid(state: &State, sid: &str) {
+    let mut current = state
+        .published_track_sid
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    current.clear();
+    current.push_str(sid);
+}
+
+fn published_track_sid_snapshot(state: &State) -> String {
+    state
+        .published_track_sid
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn sync_listener_identities<I>(state: &State, identities: I)
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut listeners = state
+        .listener_identities
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    listeners.clear();
+    for identity in identities {
+        if !identity.is_empty() {
+            listeners.insert(identity);
+        }
+    }
+    state
+        .subscriber_count
+        .store(listeners.len(), Ordering::Relaxed);
+}
+
+fn add_listener_identity(state: &State, identity: String) {
+    if identity.is_empty() {
+        return;
+    }
+    let mut listeners = state
+        .listener_identities
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    listeners.insert(identity);
+    state
+        .subscriber_count
+        .store(listeners.len(), Ordering::Relaxed);
+}
+
+fn remove_listener_identity(state: &State, identity: &str) {
+    let mut listeners = state
+        .listener_identities
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    listeners.remove(identity);
+    state
+        .subscriber_count
+        .store(listeners.len(), Ordering::Relaxed);
+}
+
+fn listener_identities_snapshot(state: &State) -> Vec<String> {
+    let mut identities: Vec<String> = state
+        .listener_identities
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .cloned()
+        .collect();
+    identities.sort();
+    identities
 }
 
 fn should_show_wizard(args: &Args) -> bool {
@@ -1830,6 +2050,7 @@ async fn run_plain_loop(
     pump: &mut AudioPump,
     cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
     native_source: &NativeAudioSource,
+    local_track: &LocalAudioTrack,
     state: &Arc<State>,
     events: &mut UnboundedReceiver<RoomEvent>,
 ) -> AppResult<LoopExit> {
@@ -1867,6 +2088,7 @@ async fn run_plain_loop(
                 }
             }
             _ = status_tick.tick() => {
+                let _ = refresh_local_track_stats(local_track, state).await;
                 print_status(state, runtime);
             }
             result = pump.send_next_frame(cons, native_source, state) => {
@@ -1881,6 +2103,7 @@ async fn run_status_tui(
     pump: &mut AudioPump,
     cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
     native_source: &NativeAudioSource,
+    local_track: &LocalAudioTrack,
     state: &Arc<State>,
     events: &mut UnboundedReceiver<RoomEvent>,
 ) -> AppResult<LoopExit> {
@@ -1904,6 +2127,7 @@ async fn run_status_tui(
         pump,
         cons,
         native_source,
+        local_track,
         state,
         events,
     )
@@ -1922,6 +2146,7 @@ async fn run_status_tui_inner(
     pump: &mut AudioPump,
     cons: &mut ringbuf::Consumer<f32, Arc<HeapRb<f32>>>,
     native_source: &NativeAudioSource,
+    local_track: &LocalAudioTrack,
     state: &Arc<State>,
     events: &mut UnboundedReceiver<RoomEvent>,
 ) -> AppResult<LoopExit> {
@@ -1979,6 +2204,7 @@ async fn run_status_tui_inner(
                 }
             }
             _ = status_tick.tick() => {
+                let _ = refresh_local_track_stats(local_track, state).await;
                 let _ = write_status_file(state, runtime);
             }
             result = pump.send_next_frame(cons, native_source, state) => {
@@ -2075,11 +2301,14 @@ fn draw_status(f: &mut ratatui::Frame, runtime: &RuntimeInfo, state: &State, qui
     let tap_packets = state.tap_packets.load(Ordering::Relaxed);
     let tap_gaps = state.tap_seq_gaps.load(Ordering::Relaxed);
     let tap_drops = state.tap_reported_drops.load(Ordering::Relaxed);
+    let rtp_packets = state.rtp_packets_sent.load(Ordering::Relaxed);
+    let rtp_bytes = state.rtp_bytes_sent.load(Ordering::Relaxed);
+    let subscribers = state.subscriber_count.load(Ordering::Relaxed);
 
     f.render_widget(
         Paragraph::new(format!(
-            "{} Hz  captured={}  sent={}  overflow={}  underrun={}  inputErr={}  lkErr={}  reconnect={}",
-            runtime.input_rate, captured, sent, overflow, underruns, errors, livekit_errors, reconnects
+            "{} Hz  captured={}  sent={}  rtpPackets={}  rtpBytes={}  listeners={}  overflow={}  underrun={}  inputErr={}  lkErr={}  reconnect={}",
+            runtime.input_rate, captured, sent, rtp_packets, rtp_bytes, subscribers, overflow, underruns, errors, livekit_errors, reconnects
         ))
         .block(Block::default().title("Frames").borders(Borders::ALL))
         .style(Style::default().fg(if overflow > 0 || errors > 0 || livekit_errors > 0 {
@@ -2240,9 +2469,12 @@ fn print_status(state: &State, runtime: &RuntimeInfo) {
     let livekit_errors = state.livekit_errors.load(Ordering::Relaxed);
     let reconnects = state.reconnects.load(Ordering::Relaxed);
     let buffer_ms = state.ring_buffer_ms.load(Ordering::Relaxed);
+    let rtp_packets = state.rtp_packets_sent.load(Ordering::Relaxed);
+    let rtp_bytes = state.rtp_bytes_sent.load(Ordering::Relaxed);
+    let subscribers = state.subscriber_count.load(Ordering::Relaxed);
 
     eprintln!(
-        "[{}] {} profile={} bitrate={}kbps red={} dtx={} queue={}ms in={}Hz buffer={}ms captured={} sent={} overflow={} underrun={} inputErr={} lkErr={} reconnect={}",
+        "[{}] {} profile={} bitrate={}kbps red={} dtx={} queue={}ms in={}Hz buffer={}ms captured={} sent={} rtpPackets={} rtpBytes={} listeners={} overflow={} underrun={} inputErr={} lkErr={} reconnect={}",
         runtime.source_label,
         connection_label(state.connection_state.load(Ordering::Relaxed)),
         profile_label(runtime.audio_profile),
@@ -2254,6 +2486,9 @@ fn print_status(state: &State, runtime: &RuntimeInfo) {
         buffer_ms,
         captured,
         sent,
+        rtp_packets,
+        rtp_bytes,
+        subscribers,
         overflow,
         underruns,
         errors,
@@ -2300,6 +2535,21 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
     let tap_packets = state.tap_packets.load(Ordering::Relaxed);
     let tap_gaps = state.tap_seq_gaps.load(Ordering::Relaxed);
     let tap_drops = state.tap_reported_drops.load(Ordering::Relaxed);
+    let rtp_packets = state.rtp_packets_sent.load(Ordering::Relaxed);
+    let rtp_bytes = state.rtp_bytes_sent.load(Ordering::Relaxed);
+    let rtp_header_bytes = state.rtp_header_bytes_sent.load(Ordering::Relaxed);
+    let rtp_retransmitted_packets = state.rtp_retransmitted_packets_sent.load(Ordering::Relaxed);
+    let rtp_retransmitted_bytes = state.rtp_retransmitted_bytes_sent.load(Ordering::Relaxed);
+    let rtp_stats_errors = state.rtp_stats_errors.load(Ordering::Relaxed);
+    let last_rtp_stats_ms = state.last_rtp_stats_unix_ms.load(Ordering::Relaxed);
+    let last_rtp_stats_age_ms: i128 = if last_rtp_stats_ms == 0 {
+        -1
+    } else {
+        now_ms as i128 - last_rtp_stats_ms as i128
+    };
+    let subscriber_count = state.subscriber_count.load(Ordering::Relaxed);
+    let listener_identities = listener_identities_snapshot(state);
+    let published_track_sid = published_track_sid_snapshot(state);
 
     let body = format!(
         concat!(
@@ -2313,6 +2563,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
             "  \"room\": {room},\n",
             "  \"identity\": {identity},\n",
             "  \"track\": \"reaper-master\",\n",
+            "  \"track_sid\": {track_sid},\n",
             "  \"input_rate_hz\": {input_rate},\n",
             "  \"output_rate_hz\": 48000,\n",
             "  \"output\": \"48 kHz stereo WebRTC audio\",\n",
@@ -2327,6 +2578,15 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
             "  \"tap_packets\": {tap_packets},\n",
             "  \"tap_sequence_gaps\": {tap_gaps},\n",
             "  \"plugin_reported_drops\": {tap_drops},\n",
+            "  \"rtp_packets_sent\": {rtp_packets},\n",
+            "  \"rtp_bytes_sent\": {rtp_bytes},\n",
+            "  \"rtp_header_bytes_sent\": {rtp_header_bytes},\n",
+            "  \"rtp_retransmitted_packets_sent\": {rtp_retransmitted_packets},\n",
+            "  \"rtp_retransmitted_bytes_sent\": {rtp_retransmitted_bytes},\n",
+            "  \"rtp_stats_errors\": {rtp_stats_errors},\n",
+            "  \"last_rtp_stats_age_ms\": {last_rtp_stats_age_ms},\n",
+            "  \"subscriber_count\": {subscriber_count},\n",
+            "  \"listener_identities\": {listener_identities},\n",
             "  \"overflow_frames\": {overflow},\n",
             "  \"underruns\": {underruns},\n",
             "  \"input_errors\": {errors},\n",
@@ -2347,6 +2607,7 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
         livekit_url = json_string(&runtime.livekit_url),
         room = json_string(&runtime.room),
         identity = json_string(&runtime.identity),
+        track_sid = json_string(&published_track_sid),
         input_rate = runtime.input_rate,
         profile = json_string(profile_label(runtime.audio_profile)),
         bitrate = runtime.bitrate,
@@ -2359,6 +2620,15 @@ fn write_status_file(state: &State, runtime: &RuntimeInfo) -> io::Result<()> {
         tap_packets = tap_packets,
         tap_gaps = tap_gaps,
         tap_drops = tap_drops,
+        rtp_packets = rtp_packets,
+        rtp_bytes = rtp_bytes,
+        rtp_header_bytes = rtp_header_bytes,
+        rtp_retransmitted_packets = rtp_retransmitted_packets,
+        rtp_retransmitted_bytes = rtp_retransmitted_bytes,
+        rtp_stats_errors = rtp_stats_errors,
+        last_rtp_stats_age_ms = last_rtp_stats_age_ms,
+        subscriber_count = subscriber_count,
+        listener_identities = json_string_array(&listener_identities),
         overflow = overflow,
         underruns = underruns,
         errors = errors,
@@ -2402,6 +2672,18 @@ fn json_string(value: &str) -> String {
     }
     escaped.push('"');
     escaped
+}
+
+fn json_string_array(values: &[String]) -> String {
+    let mut body = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            body.push_str(", ");
+        }
+        body.push_str(&json_string(value));
+    }
+    body.push(']');
+    body
 }
 
 fn f32_to_i16(sample: f32) -> i16 {

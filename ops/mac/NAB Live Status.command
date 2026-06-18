@@ -37,6 +37,7 @@ print(json.dumps({
     "room": data.get("room"),
     "identity": data.get("identity"),
     "track": data.get("track"),
+    "track_sid": data.get("track_sid", ""),
     "livekit_url": data.get("livekit_url"),
     "listen_url": data.get("listen_url"),
     "profile": data.get("profile"),
@@ -50,6 +51,15 @@ print(json.dumps({
     "tap_packets": data.get("tap_packets", 0),
     "tap_sequence_gaps": data.get("tap_sequence_gaps", 0),
     "plugin_reported_drops": data.get("plugin_reported_drops", 0),
+    "rtp_packets_sent": data.get("rtp_packets_sent", 0),
+    "rtp_bytes_sent": data.get("rtp_bytes_sent", 0),
+    "rtp_header_bytes_sent": data.get("rtp_header_bytes_sent", 0),
+    "rtp_retransmitted_packets_sent": data.get("rtp_retransmitted_packets_sent", 0),
+    "rtp_retransmitted_bytes_sent": data.get("rtp_retransmitted_bytes_sent", 0),
+    "rtp_stats_errors": data.get("rtp_stats_errors", 0),
+    "last_rtp_stats_age_ms": data.get("last_rtp_stats_age_ms", -1),
+    "subscriber_count": data.get("subscriber_count", 0),
+    "listener_identities": data.get("listener_identities", []),
     "overflow_frames": data.get("overflow_frames", 0),
     "underruns": data.get("underruns", 0),
     "input_errors": data.get("input_errors", 0),
@@ -160,52 +170,72 @@ import sys
 a = json.loads(sys.argv[1])
 b = json.loads(sys.argv[2])
 
-sent_delta = b["sent_frames"] - a["sent_frames"]
-tap_delta = b["tap_packets"] - a["tap_packets"]
-captured_delta = b["captured_frames"] - a["captured_frames"]
+def delta(key):
+    return max(0, int(b.get(key, 0)) - int(a.get(key, 0)))
+
+sent_delta = delta("sent_frames")
+tap_delta = delta("tap_packets")
+captured_delta = delta("captured_frames")
+rtp_packet_delta = delta("rtp_packets_sent")
+rtp_byte_delta = delta("rtp_bytes_sent")
 problem_total = (
     b["overflow_frames"]
     + b["underruns"]
     + b["input_errors"]
     + b["livekit_errors"]
     + b["plugin_reported_drops"]
+    + b["rtp_stats_errors"]
 )
 problem_delta = (
-    (b["overflow_frames"] - a["overflow_frames"])
-    + (b["underruns"] - a["underruns"])
-    + (b["input_errors"] - a["input_errors"])
-    + (b["livekit_errors"] - a["livekit_errors"])
-    + (b["plugin_reported_drops"] - a["plugin_reported_drops"])
+    delta("overflow_frames")
+    + delta("underruns")
+    + delta("input_errors")
+    + delta("livekit_errors")
+    + delta("plugin_reported_drops")
+    + delta("rtp_stats_errors")
 )
-tap_gap_delta = b["tap_sequence_gaps"] - a["tap_sequence_gaps"]
+tap_gap_delta = delta("tap_sequence_gaps")
+listeners = b.get("listener_identities") or []
+listeners_text = ", ".join(listeners) if listeners else "none"
 
 print(f"State      : {b['connection']}  (updated {b['age']:.1f}s ago)")
 print(f"Source     : {b['source']}  [{b['source_kind']}]")
 print(f"Room       : {b['room']}")
 print(f"Identity   : {b['identity']}")
-print(f"Track      : {b['track']}")
+print(f"Track      : {b['track']}  sid={b['track_sid'] or 'unknown'}")
 print(f"LiveKit    : {b['livekit_url']}")
 print(f"Listen     : {b['listen_url']}")
 print(f"Profile    : {b['profile']} / {int(b['bitrate_bps'] / 1000)} kbps / RED={b['red_enabled']} / DTX={b['dtx_enabled']}")
 print(f"AudioState : {b['audio_state']} / lastAudioAge={b['last_audio_frame_age_ms']} ms")
+print(f"RTP Stats  : age={b['last_rtp_stats_age_ms']} ms / errors={b['rtp_stats_errors']}")
+print(f"Listeners  : {b['subscriber_count']}  [{listeners_text}]")
 print("")
 print("2 second movement check")
 print(f"  VST3 packets: +{tap_delta}" if b["source_kind"] == "plugin" else f"  VST3 packets: n/a ({b['source_kind']})")
 print(f"  Captured    : +{captured_delta} frames")
 print(f"  Sent        : +{sent_delta} frames")
+print(f"  RTP packets : +{rtp_packet_delta}  total={b['rtp_packets_sent']}")
+print(f"  RTP bytes   : +{rtp_byte_delta}  total={b['rtp_bytes_sent']}")
+print(f"  RTP retrans : packets={b['rtp_retransmitted_packets_sent']} bytes={b['rtp_retransmitted_bytes_sent']}")
 print(f"  Peak now    : L {b['peak_left_milli']}/1000  R {b['peak_right_milli']}/1000")
 print(f"  RMS now     : L {b['rms_left_milli']}/1000  R {b['rms_right_milli']}/1000")
-print("  RTP bytes   : not exposed by current LiveKit Rust status path")
-print("  Subscribers : not exposed by local status; verify on VPS/listen page")
 print("")
-print(f"Problems total: overflow={b['overflow_frames']} underrun={b['underruns']} inputErr={b['input_errors']} livekitErr={b['livekit_errors']} reconnect={b['reconnects']} tapGaps={b['tap_sequence_gaps']} pluginDrops={b['plugin_reported_drops']}")
+print(f"Problems total: overflow={b['overflow_frames']} underrun={b['underruns']} inputErr={b['input_errors']} livekitErr={b['livekit_errors']} reconnect={b['reconnects']} tapGaps={b['tap_sequence_gaps']} pluginDrops={b['plugin_reported_drops']} rtpStatsErr={b['rtp_stats_errors']}")
 print(f"Problems +2s : {problem_delta}  tapGaps +2s={tap_gap_delta}")
 print("")
 
+audio_moving = sent_delta > 0 and (tap_delta > 0 or b["source_kind"] != "plugin")
+rtp_moving = rtp_packet_delta > 0 and rtp_byte_delta > 0
+has_listener = int(b.get("subscriber_count", 0)) > 0
+
 if b["connection"] != "Connected":
     print("Result     : NOT READY. Sender is not connected to LiveKit.")
-elif sent_delta > 0 and (tap_delta > 0 or b["source_kind"] != "plugin"):
-    print("Result     : AUDIO IS MOVING NOW.")
+elif audio_moving and rtp_moving and has_listener:
+    print("Result     : LIVE AUDIO IS MOVING TO A LISTENER NOW.")
+elif audio_moving and rtp_moving:
+    print("Result     : AUDIO IS REACHING LIVEKIT, BUT NO LISTENER IS CONNECTED.")
+elif audio_moving and not rtp_moving:
+    print("Result     : AUDIO ENTERS SENDER, BUT LIVEKIT RTP IS NOT MOVING.")
 elif tap_delta > 0 and sent_delta == 0:
     print("Result     : TAP IS MOVING, BUT LIVEKIT SEND IS NOT MOVING.")
 else:

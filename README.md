@@ -188,15 +188,17 @@ Mac miniでの通常手順:
 1. `NAB Tap Installer.command` を一度実行する。
 2. REAPERを起動し、Master FXまたはMonitor FXに `VST3: NAB Tap (Kenichi Kawabata)` を挿す。
 3. `NAB Live Sender.command` を開いたままにする。
-4. `NAB Live Status.command` で `AUDIO IS MOVING NOW` を見る。
+4. `NAB Live Status.command` で RTP packets/bytes が増えることを見る。
 5. ブラウザで `https://livekit.kenichi-kawabata.com/` を開き、数字の合言葉で `Listen`。
+6. listener接続後、`NAB Live Status.command` で `LIVE AUDIO IS MOVING TO A LISTENER NOW.` を見る。
 
 安全設計:
 
 - `NAB Live Sender.command` は既存senderがある場合、二重起動せずPIDと状態だけ表示します。
 - `nab-live` 本体にも room/identity lock と NAB Tap socket lock があります。
 - `kill` / SIGTERM 時も lock/socket を掃除し、再起動時に古いsocketで詰まらないようにしています。
-- `NAB Live Status.command` は接続だけでなく、2秒間の `tap_packets` / `captured_frames` / `sent_frames` / RMS / peak の増加を見ます。
+- `NAB Live Status.command` は接続だけでなく、2秒間の `tap_packets` / `captured_frames` / `sent_frames` / RTP packets / RTP bytes / RMS / peak の増加を見ます。
+- `NAB Live Status.command` は `subscriber_count` と `listener_identities` を表示します。listenerがいない場合は「LiveKitには届いているがlistenerなし」と分けて表示します。
 - `https://livekit.kenichi-kawabata.com/` は購読専用ページです。listener token は `canPublish=false`, `canSubscribe=true`, 短寿命TTLです。
 - listen pageは受信packet/bytes/jitter/audio level/audio element状態を表示します。
 

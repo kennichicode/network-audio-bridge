@@ -48,6 +48,9 @@ print(f"Source   : {data.get('source')}")
 print(f"Room     : {data.get('room')}")
 print(f"Profile  : {data.get('profile')} / {int(data.get('bitrate_bps', 0) / 1000)} kbps / RED={data.get('red_enabled')} / DTX={data.get('dtx_enabled')}")
 print(f"Frames   : captured={data.get('captured_frames')} sent={data.get('sent_frames')} tapPackets={data.get('tap_packets')}")
+print(f"RTP      : packets={data.get('rtp_packets_sent', 0)} bytes={data.get('rtp_bytes_sent', 0)} statsErr={data.get('rtp_stats_errors', 0)}")
+listeners = data.get("listener_identities") or []
+print(f"Listeners: {data.get('subscriber_count', 0)} [{', '.join(listeners) if listeners else 'none'}]")
 print(f"Problems : overflow={data.get('overflow_frames')} underrun={data.get('underruns')} inputErr={data.get('input_errors')} livekitErr={data.get('livekit_errors')} reconnect={data.get('reconnects')}")
 print(f"Peak     : L {data.get('peak_left_milli')}/1000  R {data.get('peak_right_milli')}/1000")
 PY

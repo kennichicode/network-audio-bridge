@@ -1,6 +1,20 @@
 local result_path = "/tmp/nab_tap_reaper_selftest_result.txt"
 local result = assert(io.open(result_path, "w"))
-local duration_seconds = tonumber(os.getenv("NAB_TAP_SELFTEST_SECONDS") or "12") or 12
+
+local function read_number(path)
+  local file = io.open(path, "r")
+  if not file then
+    return nil
+  end
+  local value = tonumber(file:read("*a"))
+  file:close()
+  return value
+end
+
+local duration_seconds = read_number("/tmp/nab_tap_selftest_seconds.txt")
+  or tonumber(os.getenv("NAB_TAP_SELFTEST_SECONDS") or "12")
+  or 12
+local track_volume = read_number("/tmp/nab_tap_selftest_volume.txt") or 0.1
 
 local function log(line)
   result:write(line .. "\n")
@@ -32,9 +46,15 @@ local track = reaper.GetTrack(0, 0)
 reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "NAB Tap Selftest Tone", true)
 reaper.SetOnlyTrackSelected(track)
 
-reaper.SetMediaTrackInfo_Value(track, "D_VOL", 0.1)
+reaper.SetMediaTrackInfo_Value(track, "D_VOL", track_volume)
 local inserted = reaper.InsertMedia("/tmp/nab_tap_selftest_tone.wav", 0)
 log("inserted_audio_media=" .. tostring(inserted))
+local item = reaper.GetSelectedMediaItem(0, 0)
+if item then
+  reaper.SetMediaItemInfo_Value(item, "B_LOOPSRC", 1)
+  reaper.SetMediaItemInfo_Value(item, "D_LENGTH", duration_seconds)
+  log("looped_item_length=" .. tostring(duration_seconds))
+end
 reaper.UpdateArrange()
 
 reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", 0, true)
